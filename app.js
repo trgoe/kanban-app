@@ -7,7 +7,10 @@ const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 const path = window.location.pathname;
 const app = document.getElementById("app");
 
-if (path.startsWith("/line/")) {
+// If root URL, go straight to Line 1
+if (path === "/") {
+  window.location.href = "/line/L1";
+} else if (path.startsWith("/line/")) {
   const line = path.split("/")[2];
   renderLine(line);
 } else if (path === "/warehouse") {
@@ -17,6 +20,7 @@ if (path.startsWith("/line/")) {
 } else {
   app.innerHTML = "<h1>Factory Kanban</h1><p>Invalid URL</p>";
 }
+
 
 /* ---------- LINE VIEW ---------- */
 
@@ -163,3 +167,4 @@ async function loadMonitor() {
     div.appendChild(card);
   });
 }
+
