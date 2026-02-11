@@ -1,0 +1,31 @@
+body {
+  font-family: Arial, sans-serif;
+  background: #f4f4f4;
+  margin: 0;
+  padding: 20px;
+}
+
+h1 {
+  margin-bottom: 20px;
+}
+
+button {
+  padding: 12px 18px;
+  margin: 5px;
+  font-size: 16px;
+  border: none;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.new { background: #ff9800; color: white; }
+.taken { background: #2196f3; color: white; }
+.delivered { background: #4caf50; color: white; }
+.confirm { background: #9c27b0; color: white; }
+
+.card {
+  background: white;
+  padding: 15px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+}
