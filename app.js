@@ -1,7 +1,10 @@
 console.log("app.js loaded");
 
 const SUPABASE_URL = "https://xopxxznvaorhvqucamve.supabase.co";
-const SUPABASE_KEY = "PASTE_YOUR_ANON_KEY_HERE";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhvcHh4em52YW9yaHZxdWNhbXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA4MDczNzEsImV4cCI6MjA4NjM4MzM3MX0.cF4zK8lrFWAURnVui_7V7ZweAgJxlEn4nyxH7qKGgko";
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
 
 // safer: use window.supabase
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -207,4 +210,5 @@ async function loadWarehouse(){
 // ===================== Routing =====================
 if(route.startsWith('#line/')) loadLine(route.split('/')[1]);   // example: #line/L1
 else loadWarehouse();                                          // default
+
 
