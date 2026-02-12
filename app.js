@@ -1,3 +1,4 @@
+console.log("app.js loaded");
 <!DOCTYPE html>
 <html>
 <head>
@@ -180,3 +181,4 @@ else loadWarehouse();
 </script>
 </body>
 </html>
+
