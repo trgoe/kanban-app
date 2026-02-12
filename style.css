@@ -1,31 +1,10 @@
-body {
-  font-family: Arial, sans-serif;
-  background: #f4f4f4;
-  margin: 0;
-  padding: 20px;
-}
-
-h1 {
-  margin-bottom: 20px;
-}
-
-button {
-  padding: 12px 18px;
-  margin: 5px;
-  font-size: 16px;
-  border: none;
-  cursor: pointer;
-  border-radius: 6px;
-}
-
-.new { background: #ff9800; color: white; }
-.taken { background: #2196f3; color: white; }
-.delivered { background: #4caf50; color: white; }
-.confirm { background: #9c27b0; color: white; }
-
-.card {
-  background: white;
-  padding: 15px;
-  margin-bottom: 10px;
-  border-radius: 8px;
-}
+body{font-family:Arial;margin:0;background:#111;color:#fff}
+.header{padding:12px;background:#222;font-size:22px;text-align:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;padding:12px}
+.btn{background:#2b7cff;border-radius:14px;padding:22px;text-align:center;font-size:20px;cursor:pointer}
+.btn:active{transform:scale(.95)}
+.table{width:100%;border-collapse:collapse}
+.table td,.table th{border-bottom:1px solid #444;padding:10px}
+.red{color:#ff4d4d}.yellow{color:#ffd24d}.green{color:#4dff88}
+.center{padding:20px;text-align:center}
+.status{font-weight:bold}
