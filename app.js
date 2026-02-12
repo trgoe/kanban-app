@@ -31,136 +31,147 @@ const currentLine = route.startsWith('#line/') ? route.split('/')[1] : null;
 
 // ===================== Line tablet =====================
 async function loadLine(line){
-    app.innerHTML=`
-        <div class='header'>LINE ${line}</div>
-        <div id='grid' class='grid'></div>
-        <div class='center'>
-            <h3>My Requests</h3>
-            <ul id='myRequests'></ul>
-        </div>
-    `;
-    const g=document.getElementById('grid');
-    const ul=document.getElementById('myRequests');
+  app.innerHTML=`
+    <div class='header'>LINE ${line}</div>
+    <div id='grid' class='grid'></div>
+    <div class='center'>
+      <h3>My Requests</h3>
+      <ul id='myRequests'></ul>
+    </div>
+  `;
+  const g=document.getElementById('grid');
+  const ul=document.getElementById('myRequests');
 
-    // Load components for this line
-    const {data} = await sb.from('components').select('*').eq('line',line);
-    (data||[]).forEach(c=>{
-        let d=document.createElement('div');
-        d.className='btn';
-        d.innerText=`${c.component} (${c.unit})`;
-        d.onclick = async()=>{
-            await sb.from('requests').insert({
-  line,
-  component:c.component,
-  unit:c.unit,
-  qty:1,
-  status:'NEW',
-  requested_at:new Date()
-});
-            alert('Request sent');
+  const {data} = await sb.from('components').select('*').eq('line',line);
+  (data||[]).forEach(c=>{
+    let d=document.createElement('div');
+    d.className='btn';
+    d.innerText=`${c.component} (${c.unit})`;
+    d.onclick = async()=>{
+      await sb.from('requests').insert({
+        line,
+        component:c.component,
+        unit:c.unit,
+        qty:1,
+        status:'NEW',
+        requested_at:new Date()
+      });
+      alert('Request sent');
+    };
+    g.appendChild(d);
+  });
+
+  async function refreshRequests(){
+    const {data} = await sb.from('requests').select('*')
+      .eq('line',line)
+      .order('requested_at',{ascending:true});
+    ul.innerHTML='';
+    (data||[]).forEach(r=>{
+      const li=document.createElement('li');
+      let statusColor='green';
+      if(r.status==='NEW') statusColor='red';
+      else if(r.status==='TAKEN') statusColor='yellow';
+      else if(r.status==='DELIVERED') statusColor='green';
+      li.innerHTML=`${r.component} - ${r.status} <span class='${statusColor}'>●</span>`;
+      if(r.status==='DELIVERED'){
+        const btn=document.createElement('button');
+        btn.innerText='Confirm';
+        btn.onclick=async()=>{
+          await sb.from('requests').update({status:'CONFIRMED',confirmed_at:new Date()}).eq('id',r.id);
         };
-        g.appendChild(d);
+        li.appendChild(btn);
+      }
+      ul.appendChild(li);
     });
+  }
 
-    // Function to refresh my requests
-    async function refreshRequests(){
-        const {data} = await sb.from('requests').select('*')
-            .eq('line',line)
-            .order('requested_at',{ascending:true});
-        ul.innerHTML='';
-        (data||[]).forEach(r=>{
-            const li=document.createElement('li');
-            let statusColor='green';
-            if(r.status==='NEW') statusColor='red';
-            else if(r.status==='TAKEN') statusColor='yellow';
-            else if(r.status==='DELIVERED') statusColor='green';
-            li.innerHTML=`${r.component} - ${r.status} <span class='${statusColor}'>●</span>`;
-            // Show confirm button if delivered
-            if(r.status==='DELIVERED'){
-                const btn=document.createElement('button');
-                btn.innerText='Confirm';
-                btn.onclick=async()=>{
-                    await sb.from('requests').update({status:'CONFIRMED',confirmed_at:new Date()}).eq('id',r.id);
-                };
-                li.appendChild(btn);
-            }
-            ul.appendChild(li);
-        });
-    }
+  refreshRequests();
 
-    // Initial load
-    refreshRequests();
-
-    // Realtime updates
-    sb.channel('line_requests')
-      .on('postgres_changes',{event:'*',schema:'public',table:'requests'},payload=>{
-          if(payload.new?.line===line) refreshRequests();
-      })
-      .subscribe();
+  sb.channel('line_requests')
+    .on('postgres_changes',{event:'*',schema:'public',table:'requests'},payload=>{
+      if(payload.new?.line===line) refreshRequests();
+    })
+    .subscribe();
 }
 
 // ===================== Warehouse =====================
 async function loadWarehouse(){
-    app.innerHTML=`<div class='header'>WAREHOUSE</div>
+  app.innerHTML=`<div class='header'>WAREHOUSE</div>
     <table class='table'>
-        <thead>
-            <tr><th>Line</th><th>Component</th><th>Qty</th><th>Unit</th><th>Status</th><th>Actions</th></tr>
-        </thead>
-        <tbody id='rows'></tbody>
+      <thead>
+        <tr>
+          <th>Line</th>
+          <th>Component</th>
+          <th>Qty</th>
+          <th>Unit</th>
+          <th>Status</th>
+          <th>Delivered at</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id='rows'></tbody>
     </table>`;
 
-    const tb=document.getElementById('rows');
+  const tb=document.getElementById('rows');
 
-    async function refresh(){
-        const {data} = await sb.from('requests').select('*').neq('status','CONFIRMED').order('requested_at',{ascending:true});
-        tb.innerHTML='';
-        (data||[]).forEach(r=>{
-            const tr=document.createElement('tr');
-            let statusColor='green';
-            if(r.status==='NEW') statusColor='red';
-            else if(r.status==='TAKEN') statusColor='yellow';
-            else if(r.status==='DELIVERED') statusColor='green';
-            tr.innerHTML=`<td>${r.line}</td><td>${r.component}</td><td>${r.qty}</td><td>${r.unit}</td><td class='status ${statusColor}'>${r.status}</td>
-            <td>
-                <button onclick="take(${r.id})">TAKE</button>
-                <button onclick="deliver(${r.id})">DELIVER</button>
-            </td>`;
-            tb.appendChild(tr);
-        });
-    }
+  async function refresh(){
+    const {data} = await sb.from('requests').select('*').neq('status','CONFIRMED').order('requested_at',{ascending:true});
+    tb.innerHTML='';
+    (data||[]).forEach(r=>{
+      const tr=document.createElement('tr');
+      let statusColor='green';
+      if(r.status==='NEW') statusColor='red';
+      else if(r.status==='TAKEN') statusColor='yellow';
+      else if(r.status==='DELIVERED') statusColor='green';
 
-    window.take=async(id)=>{await sb.from('requests').update({status:'TAKEN',taken_at:new Date()}).eq('id',id);refresh();};
-   window.deliver = async (id) => {
+      const deliveredTime = r.delivered_at
+        ? new Date(r.delivered_at).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' })
+        : '-';
 
-  // 1. get the request first (we need start time)
-  const { data } = await sb
-    .from('requests')
-    .select('requested_at')
-    .eq('id', id)
-    .single();
+      tr.innerHTML=`
+        <td>${r.line}</td>
+        <td>${r.component}</td>
+        <td>${r.qty}</td>
+        <td>${r.unit}</td>
+        <td class='status ${statusColor}'>${r.status}</td>
+        <td>${deliveredTime}</td>
+        <td>
+          <button onclick="take(${r.id})">TAKE</button>
+          <button onclick="deliver(${r.id})">DELIVER</button>
+        </td>`;
+      tb.appendChild(tr);
+    });
+  }
 
-  if(!data) return;
+  window.take = async (id) => {
+    await sb.from('requests').update({status:'TAKEN',taken_at:new Date()}).eq('id',id);
+  };
 
-  const start = new Date(data.requested_at);
-  const now = new Date();
-  const duration = Math.floor((now - start) / 1000);
+  window.deliver = async (id) => {
+    const { data } = await sb
+      .from('requests')
+      .select('requested_at')
+      .eq('id', id)
+      .single();
 
-  // 2. update row with delivery info
-  await sb.from('requests').update({
+    if(!data) return;
+
+    const start = new Date(data.requested_at);
+    const now = new Date();
+    const duration = Math.floor((now - start) / 1000);
+
+    await sb.from('requests').update({
       status:'DELIVERED',
       delivered_at: now,
       duration_sec: duration
-  }).eq('id',id);
+    }).eq('id',id);
+  };
 
-};
+  refresh();
 
-    // Initial load
-    refresh();
-
-    // Realtime subscription
-    sb.channel('warehouse_requests')
-      .on('postgres_changes',{event:'*',schema:'public',table:'requests'},refresh)
-      .subscribe();
+  sb.channel('warehouse_requests')
+    .on('postgres_changes',{event:'*',schema:'public',table:'requests'},refresh)
+    .subscribe();
 }
 
 // ===================== Routing =====================
