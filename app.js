@@ -114,33 +114,50 @@ async function hasOpenDuplicate(line, component) {
   return (data || []).length > 0;
 }
 
-// ====== LINE SCREEN ======
+// ====== LINE SCREEN (Operator tablet) ======
 async function loadLine(line) {
   app.innerHTML = `
     <div class="header">LINE ${line}</div>
-    <div class="grid" id="grid"></div>
 
-    <div class="center">
-      <h3>My Requests</h3>
-      <div id="myRequests"></div>
+    <div class="lineWrap">
+      <div class="lineSectionTitle">Order component</div>
+      <div class="grid" id="grid"></div>
+
+      <div class="lineSectionTitle">My requests (latest)</div>
+      <div id="myRequests" class="lineCards"></div>
     </div>
   `;
 
   const grid = document.getElementById("grid");
   const myRequests = document.getElementById("myRequests");
 
-  // components for this line
-  const { data: comps, error: compErr } = await sb.from("components").select("*").eq("line", line);
+  // Load components for this line
+  const { data: comps, error: compErr } = await sb
+    .from("components")
+    .select("*")
+    .eq("line", line)
+    .order("component", { ascending: true });
+
   if (compErr) console.error(compErr);
 
   (comps || []).forEach(c => {
-    const btn = document.createElement("div");
-    btn.className = "btn";
-    btn.innerText = `${c.component}\n(${c.unit || ""})`;
+    const btn = document.createElement("button");
+    btn.className = "lineBtn";
+    btn.innerHTML = `
+      <div class="lineBtnName">${c.component}</div>
+      <div class="lineBtnUnit">${c.unit || ""}</div>
+    `;
     btn.onclick = async () => {
-      // anti-duplicate
-      const dup = await hasOpenDuplicate(line, c.component);
-      if (dup) {
+      // Optional anti-duplicate: block if same component already open
+      const { data: dup, error: dupErr } = await sb
+        .from("requests")
+        .select("id")
+        .eq("line", line)
+        .eq("component", c.component)
+        .in("status", ["NEW", "TAKEN", "DELIVERED"])
+        .limit(1);
+
+      if (!dupErr && (dup || []).length > 0) {
         alert("Already requested (still open).");
         return;
       }
@@ -151,12 +168,12 @@ async function loadLine(line) {
         unit: c.unit,
         qty: 1,
         status: "NEW",
-        requested_at: new Date(),
+        requested_at: new Date()
       });
 
       if (error) {
         console.error(error);
-        alert("Request failed.");
+        alert("Request failed (check RLS).");
       } else {
         alert("Request sent");
       }
@@ -164,81 +181,108 @@ async function loadLine(line) {
     grid.appendChild(btn);
   });
 
+  function fmt(ts) {
+    if (!ts) return "-";
+    return new Date(ts).toLocaleString([], {
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit"
+    });
+  }
+
+  function mmss(sec) {
+    if (sec == null) return "--:--";
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
+  function waitSec(r) {
+    if (r.status === "DELIVERED") {
+      if (r.duration_sec != null) return r.duration_sec; // frozen lead time
+      if (r.delivered_at && r.requested_at) {
+        return Math.floor((new Date(r.delivered_at) - new Date(r.requested_at)) / 1000);
+      }
+    }
+    if (!r.requested_at) return null;
+    return Math.floor((Date.now() - new Date(r.requested_at)) / 1000);
+  }
+
   async function refreshMy() {
     const { data, error } = await sb
       .from("requests")
       .select("*")
       .eq("line", line)
       .order("requested_at", { ascending: false })
-      .limit(30);
+      .limit(20);
 
     if (error) console.error(error);
 
-    const rows = data || [];
     myRequests.innerHTML = "";
+    (data || []).forEach(r => {
+      const sec = waitSec(r);
 
-    rows.forEach(r => {
       const card = document.createElement("div");
-      card.className = "card";
-
-      const waitSec = r.status === "DELIVERED"
-        ? (r.duration_sec ?? Math.floor((new Date(r.delivered_at) - new Date(r.requested_at)) / 1000))
-        : secSince(r.requested_at);
+      card.className = "lineCard";
 
       card.innerHTML = `
-        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
-          <div>
-            <div style="font-weight:bold;">${r.component}</div>
-            <div style="opacity:.85;">Status: <span class="${statusClass(r.status)}">${r.status}</span></div>
-            <div style="opacity:.85;">Requested: ${fmtDateTime(r.requested_at)}</div>
-            <div style="opacity:.85;">Delivered: ${fmtDateTime(r.delivered_at)}</div>
-          </div>
-          <div class="${waitingColorClass(waitSec)}" style="min-width:90px;text-align:right;">
-            ${r.status === "DELIVERED" ? "Lead" : "Wait"}: ${formatSec(waitSec)}
-          </div>
+        <div class="lineCardTop">
+          <div class="lineCardTitle">${r.component}</div>
+          <div class="lineCardTimer">${r.status === "DELIVERED" ? "Lead" : "Wait"}: ${mmss(sec)}</div>
         </div>
-        <div style="margin-top:10px;" id="actions-${r.id}"></div>
+
+        <div class="lineCardMeta">
+          <div><span class="muted2">Qty</span> <b>${r.qty ?? 1}</b> ${r.unit ?? ""}</div>
+          <div><span class="muted2">Status</span> <b>${r.status}</b></div>
+        </div>
+
+        <div class="lineCardTimes">
+          <div><span class="muted2">Requested</span> ${fmt(r.requested_at)}</div>
+          <div><span class="muted2">Delivered</span> ${fmt(r.delivered_at)}</div>
+        </div>
+
+        <div class="lineCardBtns" id="lineBtns-${r.id}"></div>
       `;
 
-      const actions = card.querySelector(`#actions-${r.id}`);
+      const btnBox = card.querySelector(`#lineBtns-${r.id}`);
 
       // Confirm / Reject only when delivered
       if (r.status === "DELIVERED") {
-        const confirmBtn = document.createElement("button");
-        confirmBtn.className = "confirm";
-        confirmBtn.innerText = "Confirm";
+        const ok = document.createElement("button");
+        ok.className = "lineAction lineConfirm";
+        ok.textContent = "CONFIRM";
 
-        confirmBtn.onclick = async () => {
+        ok.onclick = async () => {
           const { error } = await sb.from("requests").update({
             status: "CONFIRMED",
-            confirmed_at: new Date(),
+            confirmed_at: new Date()
           }).eq("id", r.id);
           if (error) console.error(error);
         };
 
-        const rejectBtn = document.createElement("button");
-        rejectBtn.className = "rejected";
-        rejectBtn.innerText = "Wrong material";
+        const wrong = document.createElement("button");
+        wrong.className = "lineAction lineWrong";
+        wrong.textContent = "WRONG MATERIAL";
 
-        rejectBtn.onclick = async () => {
-          const reason = prompt("Reason (optional):", "Wrong material");
-          const payload = { status: "REJECTED" };
-          // if you later add a column 'reject_reason', we can save it.
-          const { error } = await sb.from("requests").update(payload).eq("id", r.id);
+        wrong.onclick = async () => {
+          const { error } = await sb.from("requests").update({
+            status: "REJECTED"
+          }).eq("id", r.id);
           if (error) console.error(error);
         };
 
-        actions.appendChild(confirmBtn);
-        actions.appendChild(rejectBtn);
+        btnBox.appendChild(ok);
+        btnBox.appendChild(wrong);
+      } else {
+        btnBox.innerHTML = `<div class="muted2">Waiting…</div>`;
       }
 
       myRequests.appendChild(card);
     });
   }
 
+  // Initial + realtime + fallback
   refreshMy();
 
-  // realtime + fallback refresh
   sb.channel(`line_${line}`)
     .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, (payload) => {
       if (payload.new?.line === line) refreshMy();
@@ -573,6 +617,7 @@ window.downloadCSV = async () => {
 if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
+
 
 
 
