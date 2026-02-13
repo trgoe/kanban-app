@@ -13,9 +13,26 @@ const app = document.getElementById("app");
 const route = location.hash || "#warehouse";
 
 // ====== HELPERS ======
+function parseTs(ts) {
+  if (!ts) return null;
+  let s = String(ts).trim();
+
+  // "2026-02-13 14:30:00" -> "2026-02-13T14:30:00"
+  if (s.includes(" ") && !s.includes("T")) s = s.replace(" ", "T");
+
+  // If there's no timezone info, treat it as UTC
+  const hasTZ = /Z$/i.test(s) || /[+-]\d{2}:\d{2}$/.test(s);
+  if (!hasTZ) s += "Z";
+
+  const d = new Date(s);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+
 function fmtDateTime(ts) {
-  if (!ts) return "-";
-  return new Date(ts).toLocaleString([], {
+  const d = parseTs(ts);
+  if (!d) return "-";
+  return d.toLocaleString([], {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -58,34 +75,36 @@ function statusClass(status) {
 
 // Freeze timer for finished states
 function calcSeconds(r){
-  if(!r?.requested_at) return null;
+  const startD = parseTs(r?.requested_at);
+  if (!startD) return null;
 
-  const start = new Date(r.requested_at).getTime();
-  if(!Number.isFinite(start)) return null;
+  const start = startD.getTime();
 
-  // If delivered/confirmed/rejected => stop
-  const st = String(r.status || "").toUpperCase();
-
-  // best: stored duration
+  // best: stored duration (already frozen)
   if (r.duration_sec != null && Number.isFinite(Number(r.duration_sec))) {
     return Number(r.duration_sec);
   }
 
-  // stop time preference: confirmed > delivered > now
-  let stopMs = null;
+  const st = String(r.status || "").toUpperCase();
 
-  if (st === "CONFIRMED" && r.confirmed_at) stopMs = new Date(r.confirmed_at).getTime();
-  if (!stopMs && (st === "DELIVERED" || st === "CONFIRMED" || st === "REJECTED") && r.delivered_at) {
-    stopMs = new Date(r.delivered_at).getTime();
+  // stop time preference: confirmed > delivered
+  let stopD = null;
+
+  if ((st === "CONFIRMED" || st === "REJECTED") && r.confirmed_at) {
+    stopD = parseTs(r.confirmed_at);
+  }
+  if (!stopD && (st === "DELIVERED" || st === "CONFIRMED" || st === "REJECTED") && r.delivered_at) {
+    stopD = parseTs(r.delivered_at);
   }
 
-  if (stopMs && Number.isFinite(stopMs)) {
-    return Math.max(0, Math.floor((stopMs - start)/1000));
+  if (stopD) {
+    return Math.max(0, Math.floor((stopD.getTime() - start) / 1000));
   }
 
-  // still open: live
-  return Math.max(0, Math.floor((Date.now() - start)/1000));
+  // still open
+  return Math.max(0, Math.floor((Date.now() - start) / 1000));
 }
+
 
 // ====== DUPLICATE PROTECTION ======
 async function hasOpenDuplicate(line, component) {
@@ -557,3 +576,4 @@ async function loadMonitor() {
 if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
+
