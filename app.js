@@ -2,10 +2,8 @@ console.log("app.js loaded");
 
 // ====== CONFIG ======
 const SUPABASE_URL = "https://xopxxznvaorhvqucamve.supabase.co";
-const SUPABASE_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhvcHh4em52YW9yaHZxdWNhbXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA4MDczNzEsImV4cCI6MjA4NjM4MzM3MX0.cF4zK8lrFWAURnVui_7V7ZweAgJxlEn4nyxH7qKGgko";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhvcHh4em52YW9yaHZxdWNhbXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA4MDczNzEsImV4cCI6MjA4NjM4MzM3MX0.cF4zK8lrFWAURnVui_7V7ZweAgJxlEn4nyxH7qKGgko";
 
-// thresholds for colors
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
 
@@ -13,37 +11,6 @@ const RED_AFTER_MIN = 10;
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 const route = location.hash || "#warehouse";
-
-// ====== SERVER TIME SYNC (fixes "timer starts at 60s" clock skew) ======
-let SERVER_OFFSET_MS = 0;
-
-async function syncServerTime() {
-  try {
-    // use REST endpoint Date header as server time reference
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/requests?select=id&limit=1`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`,
-        },
-      }
-    );
-
-    const dateHeader = res.headers.get("date");
-    if (!dateHeader) return;
-
-    const serverNow = new Date(dateHeader).getTime();
-    SERVER_OFFSET_MS = serverNow - Date.now();
-    console.log("Server time offset (ms):", SERVER_OFFSET_MS);
-  } catch (e) {
-    console.warn("Server time sync failed, using local clock.", e);
-  }
-}
-
-function nowMsServerAligned() {
-  return Date.now() + SERVER_OFFSET_MS;
-}
 
 // ====== HELPERS ======
 function fmtDateTime(ts) {
@@ -59,9 +26,9 @@ function fmtDateTime(ts) {
 }
 
 function formatSec(sec) {
-  if (sec == null) return "-";
+  if (sec == null) return "--:--";
   const m = Math.floor(sec / 60);
-  const s = sec % 60;
+  const s = Math.max(0, sec % 60);
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
@@ -70,6 +37,13 @@ function waitingColorClass(waitSec) {
   if (waitSec >= RED_AFTER_MIN * 60) return "w-red";
   if (waitSec >= YELLOW_AFTER_MIN * 60) return "w-yellow";
   return "w-green";
+}
+
+function urgencyClass(sec){
+  if (sec == null) return "";
+  if (sec >= RED_AFTER_MIN*60) return "uRed";
+  if (sec >= YELLOW_AFTER_MIN*60) return "uYellow";
+  return "uGreen";
 }
 
 function statusClass(status) {
@@ -82,82 +56,35 @@ function statusClass(status) {
   return "";
 }
 
-// ----- unified timer logic (STOPS on DELIVERED / CONFIRMED / REJECTED) -----
-function calcSeconds(r) {
-  if (!r?.requested_at) return null;
+// Freeze timer for finished states
+function calcSeconds(r){
+  if(!r?.requested_at) return null;
 
-  const nowMs = nowMsServerAligned();
+  const start = new Date(r.requested_at).getTime();
+  if(!Number.isFinite(start)) return null;
 
-  const requested = new Date(r.requested_at).getTime();
-  const delivered = r.delivered_at ? new Date(r.delivered_at).getTime() : null;
-  const confirmed = r.confirmed_at ? new Date(r.confirmed_at).getTime() : null;
+  // If delivered/confirmed/rejected => stop
+  const st = String(r.status || "").toUpperCase();
 
-  const status = String(r.status || "").toUpperCase();
-  const frozenStatuses = ["DELIVERED", "CONFIRMED", "REJECTED"];
-  const isFrozen = frozenStatuses.includes(status);
-
-  // If we already computed and stored duration_sec on delivery, use it
-  if (isFrozen && r.duration_sec != null) return r.duration_sec;
-
-  if (isFrozen) {
-    // freeze at delivered time if available, otherwise confirmed time, otherwise "now"
-    const stop = delivered ?? confirmed ?? nowMs;
-    return Math.max(0, Math.floor((stop - requested) / 1000));
+  // best: stored duration
+  if (r.duration_sec != null && Number.isFinite(Number(r.duration_sec))) {
+    return Number(r.duration_sec);
   }
 
-  // active (NEW/TAKEN): keep counting
-  return Math.max(0, Math.floor((nowMs - requested) / 1000));
-}
+  // stop time preference: confirmed > delivered > now
+  let stopMs = null;
 
-function fmtMMSS(sec) {
-  if (sec == null) return "--:--";
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-function urgencyClass(sec) {
-  if (sec == null) return "";
-  if (sec >= RED_AFTER_MIN * 60) return "uRed";
-  if (sec >= YELLOW_AFTER_MIN * 60) return "uYellow";
-  return "uGreen";
-}
-
-// ====== DATA FETCH (open orders) ======
-async function fetchOpenRequests(filters = {}) {
-  // filters: { line, q, status, daysBack }
-  const daysBack = Number(filters.daysBack ?? 7);
-  const since = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
-
-  let query = sb
-    .from("requests")
-    .select("*")
-    .gte("requested_at", since)
-    .order("requested_at", { ascending: true });
-
-  if (filters.status === "open") query = query.neq("status", "CONFIRMED");
-  if (filters.status === "newonly") query = query.eq("status", "NEW");
-
-  if (filters.line && filters.line !== "ALL") {
-    query = query.eq("line", filters.line);
+  if (st === "CONFIRMED" && r.confirmed_at) stopMs = new Date(r.confirmed_at).getTime();
+  if (!stopMs && (st === "DELIVERED" || st === "CONFIRMED" || st === "REJECTED") && r.delivered_at) {
+    stopMs = new Date(r.delivered_at).getTime();
   }
 
-  const { data, error } = await query;
-  if (error) {
-    console.error(error);
-    return [];
+  if (stopMs && Number.isFinite(stopMs)) {
+    return Math.max(0, Math.floor((stopMs - start)/1000));
   }
 
-  let rows = data || [];
-
-  if (filters.q && filters.q.trim()) {
-    const needle = filters.q.trim().toLowerCase();
-    rows = rows.filter((r) =>
-      String(r.component || "").toLowerCase().includes(needle)
-    );
-  }
-
-  return rows;
+  // still open: live
+  return Math.max(0, Math.floor((Date.now() - start)/1000));
 }
 
 // ====== DUPLICATE PROTECTION ======
@@ -172,12 +99,12 @@ async function hasOpenDuplicate(line, component) {
 
   if (error) {
     console.error(error);
-    return false;
+    return false; // don't block if unsure
   }
   return (data || []).length > 0;
 }
 
-// ====== LINE SCREEN (Operator tablet) ======
+// ====== LINE SCREEN ======
 async function loadLine(line) {
   app.innerHTML = `
     <div class="header">LINE ${line}</div>
@@ -194,7 +121,6 @@ async function loadLine(line) {
   const grid = document.getElementById("grid");
   const myRequests = document.getElementById("myRequests");
 
-  // Load components for this line
   const { data: comps, error: compErr } = await sb
     .from("components")
     .select("*")
@@ -203,13 +129,14 @@ async function loadLine(line) {
 
   if (compErr) console.error(compErr);
 
-  (comps || []).forEach((c) => {
+  (comps || []).forEach(c => {
     const btn = document.createElement("button");
     btn.className = "lineBtn";
     btn.innerHTML = `
       <div class="lineBtnName">${c.component}</div>
       <div class="lineBtnUnit">${c.unit || ""}</div>
     `;
+
     btn.onclick = async () => {
       const dup = await hasOpenDuplicate(line, c.component);
       if (dup) {
@@ -217,22 +144,24 @@ async function loadLine(line) {
         return;
       }
 
+      // IMPORTANT: set requested_at on client so timer starts at 00:00 immediately
       const { error } = await sb.from("requests").insert({
         line,
         component: c.component,
         unit: c.unit,
         qty: 1,
         status: "NEW",
-        requested_at: new Date(), // ok; timers are server-aligned anyway
+        requested_at: new Date().toISOString(),
       });
 
       if (error) {
         console.error(error);
-        alert("Request failed (check RLS).");
+        alert("Request failed.");
       } else {
         alert("Request sent");
       }
     };
+
     grid.appendChild(btn);
   });
 
@@ -242,17 +171,15 @@ async function loadLine(line) {
       .select("*")
       .eq("line", line)
       .order("requested_at", { ascending: false })
-      .limit(20);
+      .limit(30);
 
     if (error) console.error(error);
 
     myRequests.innerHTML = "";
-    (data || []).forEach((r) => {
+    (data || []).forEach(r => {
       const sec = calcSeconds(r);
-      const status = String(r.status || "").toUpperCase();
-      const label = ["DELIVERED", "CONFIRMED", "REJECTED"].includes(status)
-        ? "Lead"
-        : "Wait";
+      const stopped = ["DELIVERED","CONFIRMED","REJECTED"].includes(String(r.status||"").toUpperCase());
+      const label = stopped ? "Lead" : "Wait";
 
       const card = document.createElement("div");
       card.className = `lineCard ${urgencyClass(sec)}`;
@@ -260,7 +187,7 @@ async function loadLine(line) {
       card.innerHTML = `
         <div class="lineCardTop">
           <div class="lineCardTitle">${r.component}</div>
-          <div class="lineCardTimer">${label}: ${fmtMMSS(sec)}</div>
+          <div class="lineCardTimer">${label}: ${formatSec(sec)}</div>
         </div>
 
         <div class="lineCardMeta">
@@ -279,15 +206,15 @@ async function loadLine(line) {
 
       const btnBox = card.querySelector(`#lineBtns-${r.id}`);
 
-      if (status === "DELIVERED") {
+      if (String(r.status).toUpperCase() === "DELIVERED") {
         const ok = document.createElement("button");
         ok.className = "lineAction lineConfirm";
         ok.textContent = "CONFIRM";
         ok.onclick = async () => {
-          const { error } = await sb
-            .from("requests")
-            .update({ status: "CONFIRMED", confirmed_at: new Date() })
-            .eq("id", r.id);
+          const { error } = await sb.from("requests").update({
+            status: "CONFIRMED",
+            confirmed_at: new Date().toISOString(),
+          }).eq("id", r.id);
           if (error) console.error(error);
         };
 
@@ -295,21 +222,17 @@ async function loadLine(line) {
         wrong.className = "lineAction lineWrong";
         wrong.textContent = "WRONG MATERIAL";
         wrong.onclick = async () => {
-          const { error } = await sb
-            .from("requests")
-            .update({ status: "REJECTED" })
-            .eq("id", r.id);
+          const { error } = await sb.from("requests").update({
+            status: "REJECTED",
+            confirmed_at: new Date().toISOString(),
+          }).eq("id", r.id);
           if (error) console.error(error);
         };
 
         btnBox.appendChild(ok);
         btnBox.appendChild(wrong);
-      } else if (status === "CONFIRMED") {
-        btnBox.innerHTML = `<div class="muted2">Done ✅</div>`;
-      } else if (status === "REJECTED") {
-        btnBox.innerHTML = `<div class="muted2">Rejected ❌</div>`;
       } else {
-        btnBox.innerHTML = `<div class="muted2">Waiting…</div>`;
+        btnBox.innerHTML = `<div class="muted2">${stopped ? "Done ✅" : "Waiting…"}</div>`;
       }
 
       myRequests.appendChild(card);
@@ -324,12 +247,13 @@ async function loadLine(line) {
     })
     .subscribe();
 
-  setInterval(refreshMy, 3000);
+  // update timers
+  setInterval(refreshMy, 2000);
 }
 
-// ====== WAREHOUSE ======
+// ====== WAREHOUSE SCREEN ======
 async function loadWarehouse() {
-  const state = { q: "", line: "ALL", daysBack: 1 };
+  const state = { q:"", line:"ALL", daysBack:1 };
 
   app.innerHTML = `
     <div class="header">WAREHOUSE</div>
@@ -338,7 +262,7 @@ async function loadWarehouse() {
       <input id="search" class="whInput" placeholder="Search component..." />
       <select id="lineFilter" class="whInput">
         <option value="ALL">All lines</option>
-        ${Array.from({ length: 9 }, (_, i) => `<option value="L${i + 1}">L${i + 1}</option>`).join("")}
+        ${Array.from({length:9},(_,i)=>`<option value="L${i+1}">L${i+1}</option>`).join("")}
       </select>
       <select id="rangeFilter" class="whInput">
         <option value="1">Today</option>
@@ -381,9 +305,9 @@ async function loadWarehouse() {
   `;
 
   const searchEl = document.getElementById("search");
-  const lineEl = document.getElementById("lineFilter");
-  const rangeEl = document.getElementById("rangeFilter");
-  const exportBtn = document.getElementById("btnExport");
+  const lineEl   = document.getElementById("lineFilter");
+  const rangeEl  = document.getElementById("rangeFilter");
+  const exportBtn= document.getElementById("btnExport");
 
   const colNEW = document.getElementById("colNEW");
   const colTAKEN = document.getElementById("colTAKEN");
@@ -393,32 +317,21 @@ async function loadWarehouse() {
   const countTAKEN = document.getElementById("countTAKEN");
   const countDEL = document.getElementById("countDELIVERED");
 
-  function readState() {
+  function readState(){
     state.q = searchEl.value || "";
     state.line = lineEl.value || "ALL";
     state.daysBack = Number(rangeEl.value || 1);
   }
 
-  function waitingSec(r) {
-    // stop on delivered/confirmed/rejected, count live otherwise
+  function waitingSecWarehouse(r){
+    // In WH view, delivered cards show lead time frozen
     return calcSeconds(r);
   }
 
-  function fmtMMSS2(sec) {
-    return fmtMMSS(sec);
-  }
-
-  function urgencyClass2(sec) {
-    if (sec == null) return "";
-    if (sec >= RED_AFTER_MIN * 60) return "uRed";
-    if (sec >= YELLOW_AFTER_MIN * 60) return "uYellow";
-    return "uGreen";
-  }
-
-  function makeCard(r) {
-    const sec = waitingSec(r);
+  function makeCard(r){
+    const sec = waitingSecWarehouse(r);
     const card = document.createElement("div");
-    card.className = `whCard2 ${urgencyClass2(sec)}`;
+    card.className = `whCard2 ${urgencyClass(sec)}`;
 
     const req = r.requested_at ? new Date(r.requested_at) : null;
     const del = r.delivered_at ? new Date(r.delivered_at) : null;
@@ -426,7 +339,7 @@ async function loadWarehouse() {
     card.innerHTML = `
       <div class="whCardTop2">
         <div class="whLinePill">${r.line}</div>
-        <div class="whTimeBig">${fmtMMSS2(sec)}</div>
+        <div class="whTimeBig">${formatSec(sec)}</div>
       </div>
 
       <div class="whComp2">${r.component}</div>
@@ -437,12 +350,8 @@ async function loadWarehouse() {
       </div>
 
       <div class="whMiniTimes2">
-        <div><span class="muted2">Req</span> ${
-          req ? req.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"
-        }</div>
-        <div><span class="muted2">Del</span> ${
-          del ? del.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"
-        }</div>
+        <div><span class="muted2">Req</span> ${req ? req.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : "-"}</div>
+        <div><span class="muted2">Del</span> ${del ? del.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : "-"}</div>
       </div>
 
       <div class="whBtns2" id="btns-${r.id}"></div>
@@ -453,13 +362,13 @@ async function loadWarehouse() {
     const takeBtn = document.createElement("button");
     takeBtn.className = "whBigBtn whTake";
     takeBtn.textContent = "TAKE";
-    takeBtn.disabled = String(r.status).toUpperCase() !== "NEW";
+    takeBtn.disabled = (String(r.status).toUpperCase() !== "NEW");
     takeBtn.onclick = () => window.take(r.id);
 
     const delBtn = document.createElement("button");
     delBtn.className = "whBigBtn whDel";
     delBtn.textContent = "DELIVER";
-    delBtn.disabled = String(r.status).toUpperCase() === "DELIVERED";
+    delBtn.disabled = (String(r.status).toUpperCase() === "DELIVERED");
     delBtn.onclick = () => window.deliver(r.id);
 
     btns.appendChild(takeBtn);
@@ -468,91 +377,78 @@ async function loadWarehouse() {
     return card;
   }
 
-  async function render() {
+  async function render(){
     readState();
 
     const daysBack = state.daysBack;
-    const since = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+    const since = new Date(Date.now() - daysBack*24*60*60*1000).toISOString();
 
     let q = sb
       .from("requests")
       .select("*")
       .gte("requested_at", since)
-      .in("status", ["NEW", "TAKEN", "DELIVERED"])
-      .order("requested_at", { ascending: true });
+      .in("status", ["NEW","TAKEN","DELIVERED"])
+      .order("requested_at", {ascending:true});
 
-    if (state.line !== "ALL") q = q.eq("line", state.line);
+    if(state.line !== "ALL") q = q.eq("line", state.line);
 
     const { data, error } = await q;
-    if (error) {
-      console.error(error);
-      return;
-    }
+    if(error){ console.error(error); return; }
 
     let rows = data || [];
-    if (state.q.trim()) {
+    if(state.q.trim()){
       const needle = state.q.trim().toLowerCase();
-      rows = rows.filter((r) => String(r.component || "").toLowerCase().includes(needle));
+      rows = rows.filter(r => String(r.component||"").toLowerCase().includes(needle));
     }
 
-    const byStatus = { NEW: [], TAKEN: [], DELIVERED: [] };
-    rows.forEach((r) => byStatus[r.status]?.push(r));
+    const byStatus = { NEW:[], TAKEN:[], DELIVERED:[] };
+    rows.forEach(r => byStatus[r.status]?.push(r));
 
-    ["NEW", "TAKEN", "DELIVERED"].forEach((st) => {
-      byStatus[st].sort((a, b) => (waitingSec(b) || 0) - (waitingSec(a) || 0));
+    ["NEW","TAKEN","DELIVERED"].forEach(st => {
+      byStatus[st].sort((a,b)=>(calcSeconds(b)||0)-(calcSeconds(a)||0));
     });
 
     colNEW.innerHTML = "";
     colTAKEN.innerHTML = "";
     colDEL.innerHTML = "";
 
-    byStatus.NEW.forEach((r) => colNEW.appendChild(makeCard(r)));
-    byStatus.TAKEN.forEach((r) => colTAKEN.appendChild(makeCard(r)));
-    byStatus.DELIVERED.forEach((r) => colDEL.appendChild(makeCard(r)));
+    byStatus.NEW.forEach(r => colNEW.appendChild(makeCard(r)));
+    byStatus.TAKEN.forEach(r => colTAKEN.appendChild(makeCard(r)));
+    byStatus.DELIVERED.forEach(r => colDEL.appendChild(makeCard(r)));
 
     countNEW.textContent = byStatus.NEW.length;
     countTAKEN.textContent = byStatus.TAKEN.length;
     countDEL.textContent = byStatus.DELIVERED.length;
   }
 
-  // actions
   window.take = async (id) => {
-    const { error } = await sb
-      .from("requests")
-      .update({ status: "TAKEN", taken_at: new Date() })
-      .eq("id", id);
-    if (error) console.error(error);
+    const { error } = await sb.from("requests").update({
+      status:"TAKEN",
+      taken_at:new Date().toISOString()
+    }).eq("id", id);
+    if(error) console.error(error);
   };
 
   window.deliver = async (id) => {
     const { data, error } = await sb.from("requests").select("requested_at").eq("id", id).single();
-    if (error || !data) {
-      console.error(error);
-      return;
-    }
+    if(error || !data){ console.error(error); return; }
 
-    const start = new Date(data.requested_at);
-    const now = new Date();
-    const duration = Math.max(0, Math.floor((now - start) / 1000));
+    const start = new Date(data.requested_at).getTime();
+    const now = Date.now();
+    const duration = Math.max(0, Math.floor((now - start)/1000));
 
-    const { error: updErr } = await sb
-      .from("requests")
-      .update({
-        status: "DELIVERED",
-        delivered_at: now,
-        duration_sec: duration,
-      })
-      .eq("id", id);
-
-    if (updErr) console.error(updErr);
+    const { error: updErr } = await sb.from("requests").update({
+      status:"DELIVERED",
+      delivered_at: new Date(now).toISOString(),
+      duration_sec: duration
+    }).eq("id", id);
+    if(updErr) console.error(updErr);
   };
 
-  // Export CSV (current range + line + search)
+  // Export CSV (simple, last range)
   window.downloadCSV = async () => {
     readState();
-
-    const daysBack = Number(state.daysBack ?? 7);
-    const since = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+    const since = new Date(Date.now() - state.daysBack*24*60*60*1000).toISOString();
 
     let q = sb
       .from("requests")
@@ -563,50 +459,22 @@ async function loadWarehouse() {
     if (state.line && state.line !== "ALL") q = q.eq("line", state.line);
 
     const { data, error } = await q;
-    if (error) {
-      console.error(error);
-      alert("Export failed");
-      return;
-    }
+    if (error) { console.error(error); alert("Export failed"); return; }
 
-    let rows = data || [];
-    if (state.q && state.q.trim()) {
-      const needle = state.q.trim().toLowerCase();
-      rows = rows.filter((r) => String(r.component || "").toLowerCase().includes(needle));
-    }
-
-    const cols = [
-      "id",
-      "line",
-      "component",
-      "qty",
-      "unit",
-      "status",
-      "priority",
-      "requested_at",
-      "taken_at",
-      "delivered_at",
-      "confirmed_at",
-      "duration_sec",
-    ];
-
-    const escapeCSV = (v) => {
+    const cols = ["id","line","component","qty","unit","status","priority","requested_at","taken_at","delivered_at","confirmed_at","duration_sec"];
+    const esc = (v) => {
       if (v == null) return "";
-      const s = String(v).replace(/"/g, '""');
+      const s = String(v).replace(/"/g,'""');
       return /[",\n]/.test(s) ? `"${s}"` : s;
     };
+    const rows = (data || []);
+    const csv = [cols.join(","), ...rows.map(r => cols.map(c => esc(r[c])).join(","))].join("\n");
 
-    const csv = [
-      cols.join(","),
-      ...rows.map((r) => cols.map((c) => escapeCSV(r[c])).join(",")),
-    ].join("\n");
-
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob([csv], { type:"text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
-
     const a = document.createElement("a");
     a.href = url;
-    a.download = `kanban_${state.line}_${daysBack}d_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `kanban_${state.line}_${state.daysBack}d_${new Date().toISOString().slice(0,10)}.csv`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -622,13 +490,13 @@ async function loadWarehouse() {
   render();
 
   sb.channel("warehouse_requests")
-    .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, render)
+    .on("postgres_changes", {event:"*", schema:"public", table:"requests"}, render)
     .subscribe();
 
   setInterval(render, 2000);
 }
 
-// ====== MONITOR (TV) SCREEN ======
+// ====== MONITOR SCREEN ======
 async function loadMonitor() {
   app.innerHTML = `
     <div class="header">MONITOR</div>
@@ -642,34 +510,36 @@ async function loadMonitor() {
   const el = document.getElementById("monitorRows");
 
   async function render() {
-    const data = await fetchOpenRequests({ status: "open", daysBack: 7 });
+    const since = new Date(Date.now() - 7*24*60*60*1000).toISOString();
+
+    const { data, error } = await sb
+      .from("requests")
+      .select("*")
+      .gte("requested_at", since)
+      .neq("status","CONFIRMED")
+      .order("requested_at", { ascending: true });
+
+    if(error){ console.error(error); return; }
 
     const items = (data || [])
-      .map((r) => ({ r, waitSec: calcSeconds(r) }))
-      .sort((a, b) => (b.waitSec ?? 0) - (a.waitSec ?? 0));
+      .map(r => ({ r, sec: calcSeconds(r) }))
+      .sort((a,b)=>(b.sec||0)-(a.sec||0));
 
     el.innerHTML = "";
-    items.forEach(({ r, waitSec }) => {
-      const status = String(r.status || "").toUpperCase();
-      const label = ["DELIVERED", "CONFIRMED", "REJECTED"].includes(status)
-        ? "Lead"
-        : "Wait";
-
+    items.forEach(({ r, sec }) => {
       const card = document.createElement("div");
       card.className = "card monitorCard";
-
       card.innerHTML = `
         <div class="rowTop">
           <div>
             <div style="font-weight:bold;font-size:22px;">${r.line} — ${r.component}</div>
             <div style="opacity:.85;font-size:16px;">Status: <span class="${statusClass(r.status)}">${r.status}</span></div>
           </div>
-          <div class="${waitingColorClass(waitSec)} timerBig">
-            ${label}: ${formatSec(waitSec)}
+          <div class="${waitingColorClass(sec)} timerBig">
+            ${["DELIVERED","CONFIRMED","REJECTED"].includes(String(r.status||"").toUpperCase()) ? "Lead" : "Wait"}: ${formatSec(sec)}
           </div>
         </div>
       `;
-
       el.appendChild(card);
     });
   }
@@ -677,17 +547,13 @@ async function loadMonitor() {
   render();
 
   sb.channel("monitor_requests")
-    .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, render)
+    .on("postgres_changes", { event:"*", schema:"public", table:"requests" }, render)
     .subscribe();
 
   setInterval(render, 2000);
 }
 
-// ====== ROUTING (wait for server time sync first) ======
-(async () => {
-  await syncServerTime();
-
-  if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
-  else if (route.startsWith("#monitor")) loadMonitor();
-  else loadWarehouse();
-})();
+// ====== ROUTING ======
+if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
+else if (route.startsWith("#monitor")) loadMonitor();
+else loadWarehouse();
