@@ -163,13 +163,13 @@ async function loadLine(line) {
       }
 
       const { error } = await sb.from("requests").insert({
-        line,
-        component: c.component,
-        unit: c.unit,
-        qty: 1,
-        status: "NEW",
-        requested_at: new Date()
-      });
+  line,
+  component: c.component,
+  unit: c.unit,
+  qty: 1,
+  status: "NEW"
+});
+
 
       if (error) {
         console.error(error);
@@ -617,6 +617,7 @@ window.downloadCSV = async () => {
 if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
+
 
 
 
