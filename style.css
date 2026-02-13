@@ -8,3 +8,73 @@ body{font-family:Arial;margin:0;background:#111;color:#fff}
 .red{color:#ff4d4d}.yellow{color:#ffd24d}.green{color:#4dff88}
 .center{padding:20px;text-align:center}
 .status{font-weight:bold}
+/* --- extras for toolbar / monitor --- */
+.toolbar{
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
+  align-items:center;
+  padding:12px;
+  background:#222;
+}
+
+.input{
+  padding:10px;
+  border-radius:8px;
+  border:1px solid #444;
+  background:#111;
+  color:#fff;
+  min-width:160px;
+}
+
+.linkBtn{
+  display:inline-block;
+  padding:10px 14px;
+  border-radius:8px;
+  background:#2b7cff;
+  color:#fff;
+  text-decoration:none;
+}
+
+.card{
+  background:#1b1b1b;
+  border:1px solid #333;
+  border-radius:14px;
+  padding:14px;
+  margin:12px;
+}
+
+.rowTop{
+  display:flex;
+  justify-content:space-between;
+  gap:14px;
+  align-items:flex-start;
+}
+
+.timerBox{
+  min-width:120px;
+  text-align:right;
+  font-weight:bold;
+  padding:8px 10px;
+  border-radius:10px;
+  border:1px solid #333;
+}
+
+.timerBig{
+  min-width:170px;
+  text-align:right;
+  font-weight:bold;
+  padding:12px 14px;
+  border-radius:14px;
+  border:1px solid #333;
+  font-size:22px;
+}
+
+/* waiting colors */
+.w-green{ color:#4dff88; }
+.w-yellow{ color:#ffd24d; }
+.w-red{ color:#ff4d4d; }
+
+/* status badges (reuse if you want) */
+.rejected{ background:#ff4d4d; color:#fff; }
+
