@@ -249,114 +249,209 @@ async function loadLine(line) {
 }
 
 async function loadWarehouse() {
-  const state = { q:"", line:"ALL", status:"open", daysBack:7 };
+  const state = { q:"", line:"ALL", daysBack:1 };
 
   app.innerHTML = `
     <div class="header">WAREHOUSE</div>
 
-    <div class="toolbar">
-      <input id="search" class="input" placeholder="Search component..." />
-
-      <select id="lineFilter" class="input">
+    <div class="whTopbar">
+      <input id="search" class="whInput" placeholder="Search component..." />
+      <select id="lineFilter" class="whInput">
         <option value="ALL">All lines</option>
         ${Array.from({length:9},(_,i)=>`<option value="L${i+1}">L${i+1}</option>`).join("")}
       </select>
-
-      <select id="statusFilter" class="input">
-        <option value="open">Open</option>
-        <option value="newonly">NEW only</option>
-        <option value="all">All</option>
-      </select>
-
-      <select id="rangeFilter" class="input">
+      <select id="rangeFilter" class="whInput">
         <option value="1">Today</option>
-        <option value="7" selected>7 days</option>
+        <option value="7">7 days</option>
         <option value="30">30 days</option>
-        <option value="90">90 days</option>
       </select>
 
-      <button id="btnExport" class="btnSmall">Download CSV</button>
-      <a href="#monitor" class="linkBtn">Monitor</a>
+      <button id="btnExport" class="whBtn whBtnBlue">Export CSV</button>
+      <a href="#monitor" class="whBtn whBtnGhost">Monitor</a>
     </div>
 
-    <div id="cards" class="cards"></div>
+    <div class="whBoard">
+      <div class="whCol">
+        <div class="whColHead">
+          <div class="whColTitle">NEW</div>
+          <div class="whColHint">Pick these first</div>
+          <div class="whColCount" id="countNEW">0</div>
+        </div>
+        <div class="whColBody" id="colNEW"></div>
+      </div>
+
+      <div class="whCol">
+        <div class="whColHead">
+          <div class="whColTitle">TAKEN</div>
+          <div class="whColHint">Preparing / on the way</div>
+          <div class="whColCount" id="countTAKEN">0</div>
+        </div>
+        <div class="whColBody" id="colTAKEN"></div>
+      </div>
+
+      <div class="whCol">
+        <div class="whColHead">
+          <div class="whColTitle">DELIVERED</div>
+          <div class="whColHint">Waiting line confirmation</div>
+          <div class="whColCount" id="countDELIVERED">0</div>
+        </div>
+        <div class="whColBody" id="colDELIVERED"></div>
+      </div>
+    </div>
   `;
 
-  const cardsEl = document.getElementById("cards");
   const searchEl = document.getElementById("search");
   const lineEl   = document.getElementById("lineFilter");
-  const statusEl = document.getElementById("statusFilter");
   const rangeEl  = document.getElementById("rangeFilter");
   const exportBtn= document.getElementById("btnExport");
+
+  const colNEW = document.getElementById("colNEW");
+  const colTAKEN = document.getElementById("colTAKEN");
+  const colDEL = document.getElementById("colDELIVERED");
+
+  const countNEW = document.getElementById("countNEW");
+  const countTAKEN = document.getElementById("countTAKEN");
+  const countDEL = document.getElementById("countDELIVERED");
 
   function readState(){
     state.q = searchEl.value || "";
     state.line = lineEl.value || "ALL";
-    state.status = statusEl.value || "open";
-    state.daysBack = Number(rangeEl.value || 7);
+    state.daysBack = Number(rangeEl.value || 1);
   }
 
-  async function render() {
+  function waitingSec(r){
+    if(r.status === "DELIVERED"){
+      // frozen lead time
+      if(r.duration_sec != null) return r.duration_sec;
+      if(r.delivered_at && r.requested_at) {
+        return Math.floor((new Date(r.delivered_at)-new Date(r.requested_at))/1000);
+      }
+      return null;
+    }
+    // live waiting time until delivered
+    return r.requested_at ? Math.floor((Date.now()-new Date(r.requested_at))/1000) : null;
+  }
+
+  function fmtMMSS(sec){
+    if(sec == null) return "--:--";
+    const m = Math.floor(sec/60);
+    const s = sec%60;
+    return `${m}:${String(s).padStart(2,"0")}`;
+  }
+
+  function urgencyClass(sec){
+    if(sec == null) return "";
+    if(sec >= RED_AFTER_MIN*60) return "uRed";
+    if(sec >= YELLOW_AFTER_MIN*60) return "uYellow";
+    return "uGreen";
+  }
+
+  function makeCard(r){
+    const sec = waitingSec(r);
+    const card = document.createElement("div");
+    card.className = `whCard2 ${urgencyClass(sec)}`;
+
+    const req = r.requested_at ? new Date(r.requested_at) : null;
+    const del = r.delivered_at ? new Date(r.delivered_at) : null;
+
+    // minimal, warehouse-friendly info
+    card.innerHTML = `
+      <div class="whCardTop2">
+        <div class="whLinePill">${r.line}</div>
+        <div class="whTimeBig">${fmtMMSS(sec)}</div>
+      </div>
+
+      <div class="whComp2">${r.component}</div>
+
+      <div class="whSub2">
+        <div><span class="muted2">Qty</span> <b>${r.qty ?? 1}</b> ${r.unit ?? ""}</div>
+        <div class="muted2">${r.status}</div>
+      </div>
+
+      <div class="whMiniTimes2">
+        <div><span class="muted2">Req</span> ${req ? req.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : "-"}</div>
+        <div><span class="muted2">Del</span> ${del ? del.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : "-"}</div>
+      </div>
+
+      <div class="whBtns2" id="btns-${r.id}"></div>
+    `;
+
+    const btns = card.querySelector(`#btns-${r.id}`);
+
+    const takeBtn = document.createElement("button");
+    takeBtn.className = "whBigBtn whTake";
+    takeBtn.textContent = "TAKE";
+    takeBtn.disabled = (r.status !== "NEW");
+    takeBtn.onclick = () => window.take(r.id);
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "whBigBtn whDel";
+    delBtn.textContent = "DELIVER";
+    delBtn.disabled = (r.status === "DELIVERED");
+    delBtn.onclick = () => window.deliver(r.id);
+
+    btns.appendChild(takeBtn);
+    btns.appendChild(delBtn);
+
+    return card;
+  }
+
+  async function render(){
     readState();
-    const data = await fetchOpenRequests(state);
 
-    cardsEl.innerHTML = "";
+    // only open requests in selected range (NEW/TAKEN/DELIVERED)
+    const daysBack = state.daysBack;
+    const since = new Date(Date.now() - daysBack*24*60*60*1000).toISOString();
 
-    data.forEach(r => {
-      const waitSec = r.status === "DELIVERED"
-        ? (r.duration_sec ?? Math.floor((new Date(r.delivered_at) - new Date(r.requested_at))/1000))
-        : secSince(r.requested_at);
+    let q = sb
+      .from("requests")
+      .select("*")
+      .gte("requested_at", since)
+      .in("status", ["NEW","TAKEN","DELIVERED"])
+      .order("requested_at", {ascending:true});
 
-      const badgeClass = waitingColorClass(waitSec);
+    if(state.line !== "ALL") q = q.eq("line", state.line);
 
-      const card = document.createElement("div");
-      card.className = `whCard ${badgeClass}`;
+    const { data, error } = await q;
+    if(error){ console.error(error); return; }
 
-      card.innerHTML = `
-        <div class="whTop">
-          <div class="whTitle">
-            <div class="whLine">${r.line}</div>
-            <div class="whComp">${r.component}</div>
-          </div>
+    let rows = data || [];
+    if(state.q.trim()){
+      const needle = state.q.trim().toLowerCase();
+      rows = rows.filter(r => String(r.component||"").toLowerCase().includes(needle));
+    }
 
-          <div class="whTimer">
-            <div class="whTimerLabel">${r.status === "DELIVERED" ? "Lead time" : "Waiting"}</div>
-            <div class="whTimerValue">${formatSec(waitSec)}</div>
-          </div>
-        </div>
-
-        <div class="whMeta">
-          <div><span class="muted">Status:</span> <span class="whStatus ${statusClass(r.status)}">${r.status}</span></div>
-          <div><span class="muted">Qty:</span> <b>${r.qty ?? 1}</b> ${r.unit ?? ""}</div>
-        </div>
-
-        <div class="whTimes">
-          <div><span class="muted">Req:</span> ${fmtDateTime(r.requested_at)}</div>
-          <div><span class="muted">Taken:</span> ${fmtDateTime(r.taken_at)}</div>
-          <div><span class="muted">Del:</span> ${fmtDateTime(r.delivered_at)}</div>
-        </div>
-
-        <div class="whActions">
-          <button class="btnAction taken" onclick="take(${r.id})" ${r.status !== "NEW" ? "disabled" : ""}>TAKE</button>
-          <button class="btnAction delivered" onclick="deliver(${r.id})" ${r.status === "DELIVERED" ? "disabled" : ""}>DELIVER</button>
-        </div>
-      `;
-
-      cardsEl.appendChild(card);
+    // sort by longest waiting first within each status
+    const byStatus = { NEW:[], TAKEN:[], DELIVERED:[] };
+    rows.forEach(r => byStatus[r.status]?.push(r));
+    ["NEW","TAKEN","DELIVERED"].forEach(st => {
+      byStatus[st].sort((a,b)=>(waitingSec(b)||0)-(waitingSec(a)||0));
     });
+
+    colNEW.innerHTML = "";
+    colTAKEN.innerHTML = "";
+    colDEL.innerHTML = "";
+
+    byStatus.NEW.forEach(r => colNEW.appendChild(makeCard(r)));
+    byStatus.TAKEN.forEach(r => colTAKEN.appendChild(makeCard(r)));
+    byStatus.DELIVERED.forEach(r => colDEL.appendChild(makeCard(r)));
+
+    countNEW.textContent = byStatus.NEW.length;
+    countTAKEN.textContent = byStatus.TAKEN.length;
+    countDEL.textContent = byStatus.DELIVERED.length;
   }
 
-  // actions
+  // actions (same logic as before)
   window.take = async (id) => {
     const { error } = await sb.from("requests").update({
-      status:"TAKEN", taken_at:new Date()
+      status:"TAKEN",
+      taken_at:new Date()
     }).eq("id", id);
     if(error) console.error(error);
   };
 
   window.deliver = async (id) => {
-    const { data, error } = await sb.from("requests")
-      .select("requested_at").eq("id", id).single();
+    const { data, error } = await sb.from("requests").select("requested_at").eq("id", id).single();
     if(error || !data){ console.error(error); return; }
 
     const start = new Date(data.requested_at);
@@ -368,16 +463,13 @@ async function loadWarehouse() {
       delivered_at: now,
       duration_sec: duration
     }).eq("id", id);
-
     if(updErr) console.error(updErr);
   };
 
-  exportBtn.onclick = () => window.downloadCSV();
+  exportBtn.onclick = () => window.downloadCSV && window.downloadCSV();
 
-  // UI events
   searchEl.addEventListener("input", render);
   lineEl.addEventListener("change", render);
-  statusEl.addEventListener("change", render);
   rangeEl.addEventListener("change", render);
 
   render();
@@ -386,8 +478,10 @@ async function loadWarehouse() {
     .on("postgres_changes", {event:"*", schema:"public", table:"requests"}, render)
     .subscribe();
 
-  setInterval(render, 3000);
+  // smooth live timers
+  setInterval(render, 2000);
 }
+
 
 
   // export CSV respecting current filters/range
@@ -519,4 +613,5 @@ async function loadMonitor() {
 if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
+
 
