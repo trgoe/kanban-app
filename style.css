@@ -363,6 +363,107 @@ body{font-family:Arial;margin:0;background:#111;color:#fff}
   .whCol{ min-height:auto; }
 }
 
+/* ===== LINE (Operator) ===== */
+.lineWrap{
+  padding: 12px;
+}
+
+.lineSectionTitle{
+  font-weight: 900;
+  font-size: 16px;
+  margin: 10px 0 8px;
+  opacity: .9;
+}
+
+.lineBtn{
+  background:#2b7cff;
+  border:none;
+  border-radius:16px;
+  padding:18px;
+  color:#fff;
+  text-align:left;
+  cursor:pointer;
+  min-height:90px;
+}
+.lineBtn:active{ transform:scale(.98); }
+
+.lineBtnName{
+  font-size:18px;
+  font-weight:900;
+  line-height:1.15;
+}
+.lineBtnUnit{
+  margin-top:6px;
+  opacity:.9;
+  font-size:13px;
+}
+
+.lineCards{
+  display:grid;
+  gap:10px;
+  margin-top:8px;
+}
+
+.lineCard{
+  background:#0f0f0f;
+  border:1px solid #2b2b2b;
+  border-radius:18px;
+  padding:12px;
+}
+
+.lineCardTop{
+  display:flex;
+  justify-content:space-between;
+  gap:10px;
+  align-items:flex-start;
+}
+.lineCardTitle{
+  font-size:16px;
+  font-weight:1000;
+}
+.lineCardTimer{
+  font-size:18px;
+  font-weight:1000;
+  white-space:nowrap;
+}
+
+.lineCardMeta{
+  display:flex;
+  justify-content:space-between;
+  gap:10px;
+  margin-top:10px;
+  opacity:.95;
+}
+
+.lineCardTimes{
+  margin-top:8px;
+  display:grid;
+  gap:4px;
+  font-size:12px;
+  opacity:.85;
+}
+
+.lineCardBtns{
+  margin-top:10px;
+  display:flex;
+  gap:10px;
+}
+
+.lineAction{
+  flex:1;
+  padding:14px 12px;
+  border-radius:14px;
+  border:none;
+  font-size:16px;
+  font-weight:1000;
+  cursor:pointer;
+}
+
+.lineConfirm{ background:#4caf50; color:#fff; }
+.lineWrong{ background:#ff4d4d; color:#fff; }
+
+
+
 
 
 
