@@ -248,54 +248,48 @@ async function loadLine(line) {
   setInterval(refreshMy, 3000);
 }
 
-// ====== WAREHOUSE SCREEN ======
 async function loadWarehouse() {
-  // UI state
-  const state = {
-    q: "",
-    line: "ALL",
-    status: "open",    // open | all | newonly
-    daysBack: 7,       // 1 | 7 | 30 | 90
-  };
+  const state = { q:"", line:"ALL", status:"open", daysBack:7 };
 
   app.innerHTML = `
     <div class="header">WAREHOUSE</div>
 
     <div class="toolbar">
       <input id="search" class="input" placeholder="Search component..." />
+
       <select id="lineFilter" class="input">
         <option value="ALL">All lines</option>
-        ${Array.from({ length: 9 }, (_, i) => `<option value="L${i + 1}">L${i + 1}</option>`).join("")}
+        ${Array.from({length:9},(_,i)=>`<option value="L${i+1}">L${i+1}</option>`).join("")}
       </select>
 
       <select id="statusFilter" class="input">
-        <option value="open">Open (not confirmed)</option>
+        <option value="open">Open</option>
         <option value="newonly">NEW only</option>
-        <option value="all">All (in range)</option>
+        <option value="all">All</option>
       </select>
 
       <select id="rangeFilter" class="input">
         <option value="1">Today</option>
-        <option value="7" selected>Last 7 days</option>
-        <option value="30">Last 30 days</option>
-        <option value="90">Last 90 days</option>
+        <option value="7" selected>7 days</option>
+        <option value="30">30 days</option>
+        <option value="90">90 days</option>
       </select>
 
-      <button id="btnExport">Download CSV</button>
+      <button id="btnExport" class="btnSmall">Download CSV</button>
       <a href="#monitor" class="linkBtn">Monitor</a>
     </div>
 
-    <div id="rows"></div>
+    <div id="cards" class="cards"></div>
   `;
 
-  const rowsEl = document.getElementById("rows");
+  const cardsEl = document.getElementById("cards");
   const searchEl = document.getElementById("search");
-  const lineEl = document.getElementById("lineFilter");
+  const lineEl   = document.getElementById("lineFilter");
   const statusEl = document.getElementById("statusFilter");
-  const rangeEl = document.getElementById("rangeFilter");
-  const exportBtn = document.getElementById("btnExport");
+  const rangeEl  = document.getElementById("rangeFilter");
+  const exportBtn= document.getElementById("btnExport");
 
-  function readState() {
+  function readState(){
     state.q = searchEl.value || "";
     state.line = lineEl.value || "ALL";
     state.status = statusEl.value || "open";
@@ -306,70 +300,95 @@ async function loadWarehouse() {
     readState();
     const data = await fetchOpenRequests(state);
 
-    rowsEl.innerHTML = "";
+    cardsEl.innerHTML = "";
 
     data.forEach(r => {
-      const card = document.createElement("div");
-      card.className = "card";
-
-      // waiting/lead time
       const waitSec = r.status === "DELIVERED"
-        ? (r.duration_sec ?? Math.floor((new Date(r.delivered_at) - new Date(r.requested_at)) / 1000))
+        ? (r.duration_sec ?? Math.floor((new Date(r.delivered_at) - new Date(r.requested_at))/1000))
         : secSince(r.requested_at);
 
+      const badgeClass = waitingColorClass(waitSec);
+
+      const card = document.createElement("div");
+      card.className = `whCard ${badgeClass}`;
+
       card.innerHTML = `
-        <div class="rowTop">
-          <div>
-            <div style="font-weight:bold;font-size:18px;">${r.line} — ${r.component}</div>
-            <div style="opacity:.85;">
-              Status: <span class="${statusClass(r.status)}">${r.status}</span>
-              &nbsp;|&nbsp; Qty: <b>${r.qty ?? 1}</b> ${r.unit ?? ""}
-            </div>
-            <div style="opacity:.85;">Requested: ${fmtDateTime(r.requested_at)}</div>
-            <div style="opacity:.85;">Taken: ${fmtDateTime(r.taken_at)}</div>
-            <div style="opacity:.85;">Delivered: ${fmtDateTime(r.delivered_at)}</div>
+        <div class="whTop">
+          <div class="whTitle">
+            <div class="whLine">${r.line}</div>
+            <div class="whComp">${r.component}</div>
           </div>
-          <div class="${waitingColorClass(waitSec)} timerBox">
-            ${r.status === "DELIVERED" ? "Lead" : "Wait"}: ${formatSec(waitSec)}
+
+          <div class="whTimer">
+            <div class="whTimerLabel">${r.status === "DELIVERED" ? "Lead time" : "Waiting"}</div>
+            <div class="whTimerValue">${formatSec(waitSec)}</div>
           </div>
         </div>
 
-        <div class="actions">
-          <button class="taken" onclick="take(${r.id})">TAKE</button>
-          <button class="delivered" onclick="deliver(${r.id})">DELIVER</button>
+        <div class="whMeta">
+          <div><span class="muted">Status:</span> <span class="whStatus ${statusClass(r.status)}">${r.status}</span></div>
+          <div><span class="muted">Qty:</span> <b>${r.qty ?? 1}</b> ${r.unit ?? ""}</div>
+        </div>
+
+        <div class="whTimes">
+          <div><span class="muted">Req:</span> ${fmtDateTime(r.requested_at)}</div>
+          <div><span class="muted">Taken:</span> ${fmtDateTime(r.taken_at)}</div>
+          <div><span class="muted">Del:</span> ${fmtDateTime(r.delivered_at)}</div>
+        </div>
+
+        <div class="whActions">
+          <button class="btnAction taken" onclick="take(${r.id})" ${r.status !== "NEW" ? "disabled" : ""}>TAKE</button>
+          <button class="btnAction delivered" onclick="deliver(${r.id})" ${r.status === "DELIVERED" ? "disabled" : ""}>DELIVER</button>
         </div>
       `;
 
-      rowsEl.appendChild(card);
+      cardsEl.appendChild(card);
     });
   }
 
   // actions
   window.take = async (id) => {
     const { error } = await sb.from("requests").update({
-      status: "TAKEN",
-      taken_at: new Date(),
+      status:"TAKEN", taken_at:new Date()
     }).eq("id", id);
-    if (error) console.error(error);
+    if(error) console.error(error);
   };
 
   window.deliver = async (id) => {
-    // get requested_at to compute duration
-    const { data, error } = await sb.from("requests").select("requested_at").eq("id", id).single();
-    if (error || !data) { console.error(error); return; }
+    const { data, error } = await sb.from("requests")
+      .select("requested_at").eq("id", id).single();
+    if(error || !data){ console.error(error); return; }
 
     const start = new Date(data.requested_at);
     const now = new Date();
-    const duration = Math.floor((now - start) / 1000);
+    const duration = Math.floor((now - start)/1000);
 
     const { error: updErr } = await sb.from("requests").update({
-      status: "DELIVERED",
+      status:"DELIVERED",
       delivered_at: now,
-      duration_sec: duration,
+      duration_sec: duration
     }).eq("id", id);
 
-    if (updErr) console.error(updErr);
+    if(updErr) console.error(updErr);
   };
+
+  exportBtn.onclick = () => window.downloadCSV();
+
+  // UI events
+  searchEl.addEventListener("input", render);
+  lineEl.addEventListener("change", render);
+  statusEl.addEventListener("change", render);
+  rangeEl.addEventListener("change", render);
+
+  render();
+
+  sb.channel("warehouse_requests")
+    .on("postgres_changes", {event:"*", schema:"public", table:"requests"}, render)
+    .subscribe();
+
+  setInterval(render, 3000);
+}
+
 
   // export CSV respecting current filters/range
   window.downloadCSV = async () => {
@@ -500,3 +519,4 @@ async function loadMonitor() {
 if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
+
