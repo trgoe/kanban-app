@@ -121,7 +121,7 @@ async function loadLine(line) {
 
     <div class="lineWrap">
       <div class="lineSectionTitle">Order component</div>
-      <div class="grid" id="grid"></div>
+      <div class="lineGrid" id="grid"></div>
 
       <div class="lineSectionTitle">My requests (latest)</div>
       <div id="myRequests" class="lineCards"></div>
@@ -222,7 +222,7 @@ async function loadLine(line) {
       const sec = waitSec(r);
 
       const card = document.createElement("div");
-      card.className = "lineCard";
+      card.className = `lineCard ${urgencyClass(sec)}`;
 
       card.innerHTML = `
         <div class="lineCardTop">
@@ -617,6 +617,7 @@ window.downloadCSV = async () => {
 if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
+
 
 
 
