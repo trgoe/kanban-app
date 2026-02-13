@@ -482,57 +482,6 @@ async function loadWarehouse() {
   setInterval(render, 2000);
 }
 
-    // apply same component search filter client-side
-    let rows = data || [];
-    if (state.q && state.q.trim()) {
-      const needle = state.q.trim().toLowerCase();
-      rows = rows.filter(r => String(r.component || "").toLowerCase().includes(needle));
-    }
-
-    const cols = ["id","line","component","qty","unit","status","priority","requested_at","taken_at","delivered_at","confirmed_at","duration_sec"];
-
-    const escapeCSV = (v) => {
-      if (v == null) return "";
-      const s = String(v).replace(/"/g,'""');
-      return /[",\n]/.test(s) ? `"${s}"` : s;
-    };
-
-    const csv = [
-      cols.join(","),
-      ...rows.map(r => cols.map(c => escapeCSV(r[c])).join(","))
-    ].join("\n");
-
-    const blob = new Blob([csv], { type:"text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `kanban_${state.line}_${daysBack}d_${new Date().toISOString().slice(0,10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  };
-
-  exportBtn.onclick = () => window.downloadCSV();
-
-  // wire inputs
-  searchEl.addEventListener("input", () => render());
-  lineEl.addEventListener("change", () => render());
-  statusEl.addEventListener("change", () => render());
-  rangeEl.addEventListener("change", () => render());
-
-  // realtime + fallback timer refresh
-  render();
-
-  sb.channel("warehouse_requests")
-    .on("postgres_changes", { event:"*", schema:"public", table:"requests" }, () => render())
-    .subscribe();
-
-  // update timers
-  setInterval(render, 3000);
-}
-
 // ====== MONITOR (TV) SCREEN ======
 async function loadMonitor() {
   app.innerHTML = `
@@ -624,6 +573,7 @@ window.downloadCSV = async () => {
 if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
+
 
 
 
