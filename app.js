@@ -482,26 +482,6 @@ async function loadWarehouse() {
   setInterval(render, 2000);
 }
 
-
-
-  // export CSV respecting current filters/range
-  window.downloadCSV = async () => {
-    readState();
-
-    const daysBack = Number(state.daysBack ?? 7);
-    const since = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
-
-    let q = sb
-      .from("requests")
-      .select("id,line,component,qty,unit,status,priority,requested_at,taken_at,delivered_at,confirmed_at,duration_sec")
-      .gte("requested_at", since)
-      .order("requested_at", { ascending: true });
-
-    if (state.line && state.line !== "ALL") q = q.eq("line", state.line);
-
-    const { data, error } = await q;
-    if (error) { console.error(error); alert("Export failed"); return; }
-
     // apply same component search filter client-side
     let rows = data || [];
     if (state.q && state.q.trim()) {
@@ -608,10 +588,42 @@ async function loadMonitor() {
 
   setInterval(render, 2000);
 }
+window.downloadCSV = async () => {
+  // last 7 days, all lines by default
+  const since = new Date(Date.now() - 7*24*60*60*1000).toISOString();
+
+  const { data, error } = await sb
+    .from("requests")
+    .select("id,line,component,qty,unit,status,priority,requested_at,taken_at,delivered_at,confirmed_at,duration_sec")
+    .gte("requested_at", since)
+    .order("requested_at", { ascending: true });
+
+  if (error) { console.error(error); alert("Export failed"); return; }
+
+  const cols = ["id","line","component","qty","unit","status","priority","requested_at","taken_at","delivered_at","confirmed_at","duration_sec"];
+  const escapeCSV = (v) => {
+    if (v == null) return "";
+    const s = String(v).replace(/"/g,'""');
+    return /[",\n]/.test(s) ? `"${s}"` : s;
+  };
+
+  const csv = [cols.join(","), ...(data||[]).map(r => cols.map(c => escapeCSV(r[c])).join(","))].join("\n");
+
+  const blob = new Blob([csv], { type:"text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `kanban_export_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
 
 // ====== ROUTING ======
 if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
+
 
 
