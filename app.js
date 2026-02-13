@@ -4,7 +4,6 @@ console.log("app.js loaded");
 const SUPABASE_URL = "https://xopxxznvaorhvqucamve.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhvcHh4em52YW9yaHZxdWNhbXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA4MDczNzEsImV4cCI6MjA4NjM4MzM3MX0.cF4zK8lrFWAURnVui_7V7ZweAgJxlEn4nyxH7qKGgko";
 
-// thresholds for colors
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
 
@@ -26,13 +25,8 @@ function fmtDateTime(ts) {
   });
 }
 
-function secSince(ts) {
-  if (!ts) return null;
-  return Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
-}
-
 function formatSec(sec) {
-  if (sec == null) return "-";
+  if (sec == null) return "--:--";
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
@@ -45,6 +39,13 @@ function waitingColorClass(waitSec) {
   return "w-green";
 }
 
+function urgencyClass(sec) {
+  if (sec == null) return "";
+  if (sec >= RED_AFTER_MIN * 60) return "uRed";
+  if (sec >= YELLOW_AFTER_MIN * 60) return "uYellow";
+  return "uGreen";
+}
+
 function statusClass(status) {
   const s = String(status || "").toLowerCase();
   if (s === "new") return "new";
@@ -55,9 +56,39 @@ function statusClass(status) {
   return "";
 }
 
-// ====== DATA FETCH (open orders) ======
+// ✅ One correct timer logic everywhere
+// - NEW/TAKEN => live wait (now - requested_at)
+// - DELIVERED/CONFIRMED/REJECTED => frozen lead time
+function calcSeconds(r) {
+  if (!r?.requested_at) return null;
+
+  const requested = new Date(r.requested_at).getTime();
+  const delivered = r.delivered_at ? new Date(r.delivered_at).getTime() : null;
+  const confirmed = r.confirmed_at ? new Date(r.confirmed_at).getTime() : null;
+
+  const frozenStatuses = ["DELIVERED", "CONFIRMED", "REJECTED"];
+  const isFrozen = frozenStatuses.includes(String(r.status || "").toUpperCase());
+
+  // If DB already has duration_sec, ALWAYS trust it for frozen states
+  if (isFrozen && r.duration_sec != null) return r.duration_sec;
+
+  if (isFrozen) {
+    // pick best “stop time”
+    const stop = delivered ?? confirmed ?? Date.now();
+    return Math.max(0, Math.floor((stop - requested) / 1000));
+  }
+
+  // live waiting
+  return Math.max(0, Math.floor((Date.now() - requested) / 1000));
+}
+
+function isFrozenStatus(status) {
+  const s = String(status || "").toUpperCase();
+  return s === "DELIVERED" || s === "CONFIRMED" || s === "REJECTED";
+}
+
+// ====== DATA FETCH ======
 async function fetchOpenRequests(filters = {}) {
-  // filters: { line, q, status, daysBack }
   const daysBack = Number(filters.daysBack ?? 7);
   const since = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
 
@@ -67,17 +98,10 @@ async function fetchOpenRequests(filters = {}) {
     .gte("requested_at", since)
     .order("requested_at", { ascending: true });
 
-  // Open vs all:
-  // - "open": not CONFIRMED
-  // - "all": everything in date range
-  // - "newonly": NEW only
   if (filters.status === "open") query = query.neq("status", "CONFIRMED");
   if (filters.status === "newonly") query = query.eq("status", "NEW");
 
-  // optional line filter
-  if (filters.line && filters.line !== "ALL") {
-    query = query.eq("line", filters.line);
-  }
+  if (filters.line && filters.line !== "ALL") query = query.eq("line", filters.line);
 
   const { data, error } = await query;
   if (error) {
@@ -86,13 +110,10 @@ async function fetchOpenRequests(filters = {}) {
   }
 
   let rows = data || [];
-
-  // text search on component
   if (filters.q && filters.q.trim()) {
     const needle = filters.q.trim().toLowerCase();
     rows = rows.filter(r => String(r.component || "").toLowerCase().includes(needle));
   }
-
   return rows;
 }
 
@@ -103,18 +124,17 @@ async function hasOpenDuplicate(line, component) {
     .select("id,status")
     .eq("line", line)
     .eq("component", component)
-    .in("status", ["NEW", "TAKEN", "DELIVERED"]) // open statuses
+    .in("status", ["NEW", "TAKEN", "DELIVERED"])
     .limit(1);
 
   if (error) {
     console.error(error);
-    // if unsure, allow rather than block
     return false;
   }
   return (data || []).length > 0;
 }
 
-// ====== LINE SCREEN (Operator tablet) ======
+// ====== LINE SCREEN ======
 async function loadLine(line) {
   app.innerHTML = `
     <div class="header">LINE ${line}</div>
@@ -131,7 +151,6 @@ async function loadLine(line) {
   const grid = document.getElementById("grid");
   const myRequests = document.getElementById("myRequests");
 
-  // Load components for this line
   const { data: comps, error: compErr } = await sb
     .from("components")
     .select("*")
@@ -147,65 +166,37 @@ async function loadLine(line) {
       <div class="lineBtnName">${c.component}</div>
       <div class="lineBtnUnit">${c.unit || ""}</div>
     `;
-    btn.onclick = async () => {
-      // Optional anti-duplicate: block if same component already open
-      const { data: dup, error: dupErr } = await sb
-        .from("requests")
-        .select("id")
-        .eq("line", line)
-        .eq("component", c.component)
-        .in("status", ["NEW", "TAKEN", "DELIVERED"])
-        .limit(1);
 
-      if (!dupErr && (dup || []).length > 0) {
+    btn.onclick = async () => {
+      const dup = await hasOpenDuplicate(line, c.component);
+      if (dup) {
         alert("Already requested (still open).");
         return;
       }
 
-      const { error } = await sb.from("requests").insert({
-  line,
-  component: c.component,
-  unit: c.unit,
-  qty: 1,
-  status: "NEW"
-});
+      // ✅ IMPORTANT: set requested_at explicitly so timer starts at 0:00, not ~60
+      const nowIso = new Date().toISOString();
 
+      const { error } = await sb.from("requests").insert({
+        line,
+        component: c.component,
+        unit: c.unit,
+        qty: 1,
+        status: "NEW",
+        requested_at: nowIso
+      });
 
       if (error) {
         console.error(error);
         alert("Request failed (check RLS).");
       } else {
-        alert("Request sent");
+        // refresh immediately so UI updates without waiting
+        refreshMy();
       }
     };
+
     grid.appendChild(btn);
   });
-
-  function fmt(ts) {
-    if (!ts) return "-";
-    return new Date(ts).toLocaleString([], {
-      year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", second: "2-digit"
-    });
-  }
-
-  function mmss(sec) {
-    if (sec == null) return "--:--";
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return `${m}:${String(s).padStart(2, "0")}`;
-  }
-
-  function waitSec(r) {
-    if (r.status === "DELIVERED") {
-      if (r.duration_sec != null) return r.duration_sec; // frozen lead time
-      if (r.delivered_at && r.requested_at) {
-        return Math.floor((new Date(r.delivered_at) - new Date(r.requested_at)) / 1000);
-      }
-    }
-    if (!r.requested_at) return null;
-    return Math.floor((Date.now() - new Date(r.requested_at)) / 1000);
-  }
 
   async function refreshMy() {
     const { data, error } = await sb
@@ -219,7 +210,8 @@ async function loadLine(line) {
 
     myRequests.innerHTML = "";
     (data || []).forEach(r => {
-      const sec = waitSec(r);
+      const sec = calcSeconds(r);
+      const frozen = isFrozenStatus(r.status);
 
       const card = document.createElement("div");
       card.className = `lineCard ${urgencyClass(sec)}`;
@@ -227,7 +219,7 @@ async function loadLine(line) {
       card.innerHTML = `
         <div class="lineCardTop">
           <div class="lineCardTitle">${r.component}</div>
-          <div class="lineCardTimer">${r.status === "DELIVERED" ? "Lead" : "Wait"}: ${mmss(sec)}</div>
+          <div class="lineCardTimer">${frozen ? "Lead" : "Wait"}: ${formatSec(sec)}</div>
         </div>
 
         <div class="lineCardMeta">
@@ -236,8 +228,9 @@ async function loadLine(line) {
         </div>
 
         <div class="lineCardTimes">
-          <div><span class="muted2">Requested</span> ${fmt(r.requested_at)}</div>
-          <div><span class="muted2">Delivered</span> ${fmt(r.delivered_at)}</div>
+          <div><span class="muted2">Requested</span> ${fmtDateTime(r.requested_at)}</div>
+          <div><span class="muted2">Delivered</span> ${fmtDateTime(r.delivered_at)}</div>
+          <div><span class="muted2">Confirmed</span> ${fmtDateTime(r.confirmed_at)}</div>
         </div>
 
         <div class="lineCardBtns" id="lineBtns-${r.id}"></div>
@@ -245,42 +238,47 @@ async function loadLine(line) {
 
       const btnBox = card.querySelector(`#lineBtns-${r.id}`);
 
-      // Confirm / Reject only when delivered
-      if (r.status === "DELIVERED") {
+      if (String(r.status).toUpperCase() === "DELIVERED") {
         const ok = document.createElement("button");
         ok.className = "lineAction lineConfirm";
         ok.textContent = "CONFIRM";
-
         ok.onclick = async () => {
+          // ✅ freeze timer by storing duration_sec on confirmation if missing
+          const secFinal = calcSeconds({ ...r, status: "CONFIRMED", confirmed_at: new Date().toISOString() });
+
           const { error } = await sb.from("requests").update({
             status: "CONFIRMED",
-            confirmed_at: new Date()
+            confirmed_at: new Date(),
+            duration_sec: r.duration_sec ?? secFinal
           }).eq("id", r.id);
+
           if (error) console.error(error);
         };
 
         const wrong = document.createElement("button");
         wrong.className = "lineAction lineWrong";
         wrong.textContent = "WRONG MATERIAL";
-
         wrong.onclick = async () => {
+          const secFinal = calcSeconds({ ...r, status: "REJECTED", confirmed_at: new Date().toISOString() });
+
           const { error } = await sb.from("requests").update({
-            status: "REJECTED"
+            status: "REJECTED",
+            duration_sec: r.duration_sec ?? secFinal
           }).eq("id", r.id);
+
           if (error) console.error(error);
         };
 
         btnBox.appendChild(ok);
         btnBox.appendChild(wrong);
       } else {
-        btnBox.innerHTML = `<div class="muted2">Waiting…</div>`;
+        btnBox.innerHTML = `<div class="muted2">—</div>`;
       }
 
       myRequests.appendChild(card);
     });
   }
 
-  // Initial + realtime + fallback
   refreshMy();
 
   sb.channel(`line_${line}`)
@@ -289,11 +287,13 @@ async function loadLine(line) {
     })
     .subscribe();
 
-  setInterval(refreshMy, 3000);
+  // live timers
+  setInterval(refreshMy, 2000);
 }
 
+// ====== WAREHOUSE SCREEN ======
 async function loadWarehouse() {
-  const state = { q:"", line:"ALL", daysBack:1 };
+  const state = { q: "", line: "ALL", daysBack: 1 };
 
   app.innerHTML = `
     <div class="header">WAREHOUSE</div>
@@ -302,7 +302,7 @@ async function loadWarehouse() {
       <input id="search" class="whInput" placeholder="Search component..." />
       <select id="lineFilter" class="whInput">
         <option value="ALL">All lines</option>
-        ${Array.from({length:9},(_,i)=>`<option value="L${i+1}">L${i+1}</option>`).join("")}
+        ${Array.from({ length: 9 }, (_, i) => `<option value="L${i + 1}">L${i + 1}</option>`).join("")}
       </select>
       <select id="rangeFilter" class="whInput">
         <option value="1">Today</option>
@@ -345,9 +345,9 @@ async function loadWarehouse() {
   `;
 
   const searchEl = document.getElementById("search");
-  const lineEl   = document.getElementById("lineFilter");
-  const rangeEl  = document.getElementById("rangeFilter");
-  const exportBtn= document.getElementById("btnExport");
+  const lineEl = document.getElementById("lineFilter");
+  const rangeEl = document.getElementById("rangeFilter");
+  const exportBtn = document.getElementById("btnExport");
 
   const colNEW = document.getElementById("colNEW");
   const colTAKEN = document.getElementById("colTAKEN");
@@ -357,52 +357,24 @@ async function loadWarehouse() {
   const countTAKEN = document.getElementById("countTAKEN");
   const countDEL = document.getElementById("countDELIVERED");
 
-  function readState(){
+  function readState() {
     state.q = searchEl.value || "";
     state.line = lineEl.value || "ALL";
     state.daysBack = Number(rangeEl.value || 1);
   }
 
-  function waitingSec(r){
-    if(r.status === "DELIVERED"){
-      // frozen lead time
-      if(r.duration_sec != null) return r.duration_sec;
-      if(r.delivered_at && r.requested_at) {
-        return Math.floor((new Date(r.delivered_at)-new Date(r.requested_at))/1000);
-      }
-      return null;
-    }
-    // live waiting time until delivered
-    return r.requested_at ? Math.floor((Date.now()-new Date(r.requested_at))/1000) : null;
-  }
-
-  function fmtMMSS(sec){
-    if(sec == null) return "--:--";
-    const m = Math.floor(sec/60);
-    const s = sec%60;
-    return `${m}:${String(s).padStart(2,"0")}`;
-  }
-
-  function urgencyClass(sec){
-    if(sec == null) return "";
-    if(sec >= RED_AFTER_MIN*60) return "uRed";
-    if(sec >= YELLOW_AFTER_MIN*60) return "uYellow";
-    return "uGreen";
-  }
-
-  function makeCard(r){
-    const sec = waitingSec(r);
+  function makeCard(r) {
+    const sec = calcSeconds(r);
     const card = document.createElement("div");
     card.className = `whCard2 ${urgencyClass(sec)}`;
 
     const req = r.requested_at ? new Date(r.requested_at) : null;
     const del = r.delivered_at ? new Date(r.delivered_at) : null;
 
-    // minimal, warehouse-friendly info
     card.innerHTML = `
       <div class="whCardTop2">
         <div class="whLinePill">${r.line}</div>
-        <div class="whTimeBig">${fmtMMSS(sec)}</div>
+        <div class="whTimeBig">${formatSec(sec)}</div>
       </div>
 
       <div class="whComp2">${r.component}</div>
@@ -413,8 +385,8 @@ async function loadWarehouse() {
       </div>
 
       <div class="whMiniTimes2">
-        <div><span class="muted2">Req</span> ${req ? req.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : "-"}</div>
-        <div><span class="muted2">Del</span> ${del ? del.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : "-"}</div>
+        <div><span class="muted2">Req</span> ${req ? req.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}</div>
+        <div><span class="muted2">Del</span> ${del ? del.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}</div>
       </div>
 
       <div class="whBtns2" id="btns-${r.id}"></div>
@@ -425,13 +397,13 @@ async function loadWarehouse() {
     const takeBtn = document.createElement("button");
     takeBtn.className = "whBigBtn whTake";
     takeBtn.textContent = "TAKE";
-    takeBtn.disabled = (r.status !== "NEW");
+    takeBtn.disabled = (String(r.status).toUpperCase() !== "NEW");
     takeBtn.onclick = () => window.take(r.id);
 
     const delBtn = document.createElement("button");
     delBtn.className = "whBigBtn whDel";
     delBtn.textContent = "DELIVER";
-    delBtn.disabled = (r.status === "DELIVERED");
+    delBtn.disabled = (String(r.status).toUpperCase() === "DELIVERED");
     delBtn.onclick = () => window.deliver(r.id);
 
     btns.appendChild(takeBtn);
@@ -440,36 +412,37 @@ async function loadWarehouse() {
     return card;
   }
 
-  async function render(){
+  async function render() {
     readState();
 
-    // only open requests in selected range (NEW/TAKEN/DELIVERED)
-    const daysBack = state.daysBack;
-    const since = new Date(Date.now() - daysBack*24*60*60*1000).toISOString();
+    const since = new Date(Date.now() - state.daysBack * 24 * 60 * 60 * 1000).toISOString();
 
     let q = sb
       .from("requests")
       .select("*")
       .gte("requested_at", since)
-      .in("status", ["NEW","TAKEN","DELIVERED"])
-      .order("requested_at", {ascending:true});
+      .in("status", ["NEW", "TAKEN", "DELIVERED"])
+      .order("requested_at", { ascending: true });
 
-    if(state.line !== "ALL") q = q.eq("line", state.line);
+    if (state.line !== "ALL") q = q.eq("line", state.line);
 
     const { data, error } = await q;
-    if(error){ console.error(error); return; }
-
-    let rows = data || [];
-    if(state.q.trim()){
-      const needle = state.q.trim().toLowerCase();
-      rows = rows.filter(r => String(r.component||"").toLowerCase().includes(needle));
+    if (error) {
+      console.error(error);
+      return;
     }
 
-    // sort by longest waiting first within each status
-    const byStatus = { NEW:[], TAKEN:[], DELIVERED:[] };
+    let rows = data || [];
+    if (state.q.trim()) {
+      const needle = state.q.trim().toLowerCase();
+      rows = rows.filter(r => String(r.component || "").toLowerCase().includes(needle));
+    }
+
+    // sort longest first within each status
+    const byStatus = { NEW: [], TAKEN: [], DELIVERED: [] };
     rows.forEach(r => byStatus[r.status]?.push(r));
-    ["NEW","TAKEN","DELIVERED"].forEach(st => {
-      byStatus[st].sort((a,b)=>(waitingSec(b)||0)-(waitingSec(a)||0));
+    ["NEW", "TAKEN", "DELIVERED"].forEach(st => {
+      byStatus[st].sort((a, b) => (calcSeconds(b) || 0) - (calcSeconds(a) || 0));
     });
 
     colNEW.innerHTML = "";
@@ -485,29 +458,30 @@ async function loadWarehouse() {
     countDEL.textContent = byStatus.DELIVERED.length;
   }
 
-  // actions (same logic as before)
+  // actions
   window.take = async (id) => {
     const { error } = await sb.from("requests").update({
-      status:"TAKEN",
-      taken_at:new Date()
+      status: "TAKEN",
+      taken_at: new Date()
     }).eq("id", id);
-    if(error) console.error(error);
+    if (error) console.error(error);
   };
 
   window.deliver = async (id) => {
     const { data, error } = await sb.from("requests").select("requested_at").eq("id", id).single();
-    if(error || !data){ console.error(error); return; }
+    if (error || !data) { console.error(error); return; }
 
     const start = new Date(data.requested_at);
     const now = new Date();
-    const duration = Math.floor((now - start)/1000);
+    const duration = Math.max(0, Math.floor((now - start) / 1000));
 
     const { error: updErr } = await sb.from("requests").update({
-      status:"DELIVERED",
+      status: "DELIVERED",
       delivered_at: now,
       duration_sec: duration
     }).eq("id", id);
-    if(updErr) console.error(updErr);
+
+    if (updErr) console.error(updErr);
   };
 
   exportBtn.onclick = () => window.downloadCSV && window.downloadCSV();
@@ -519,14 +493,13 @@ async function loadWarehouse() {
   render();
 
   sb.channel("warehouse_requests")
-    .on("postgres_changes", {event:"*", schema:"public", table:"requests"}, render)
+    .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, render)
     .subscribe();
 
-  // smooth live timers
   setInterval(render, 2000);
 }
 
-// ====== MONITOR (TV) SCREEN ======
+// ====== MONITOR SCREEN ======
 async function loadMonitor() {
   app.innerHTML = `
     <div class="header">MONITOR</div>
@@ -540,20 +513,16 @@ async function loadMonitor() {
   const el = document.getElementById("monitorRows");
 
   async function render() {
-    // show only open orders (not confirmed), last 7 days
     const data = await fetchOpenRequests({ status: "open", daysBack: 7 });
 
-    // compute waiting time and sort by longest waiting
-    const items = (data || []).map(r => {
-      const waitSec = r.status === "DELIVERED"
-        ? (r.duration_sec ?? Math.floor((new Date(r.delivered_at) - new Date(r.requested_at)) / 1000))
-        : secSince(r.requested_at);
-
-      return { r, waitSec };
-    }).sort((a,b) => (b.waitSec ?? 0) - (a.waitSec ?? 0));
+    const items = (data || [])
+      .map(r => ({ r, sec: calcSeconds(r) }))
+      .sort((a, b) => (b.sec ?? 0) - (a.sec ?? 0));
 
     el.innerHTML = "";
-    items.forEach(({ r, waitSec }) => {
+    items.forEach(({ r, sec }) => {
+      const frozen = isFrozenStatus(r.status);
+
       const card = document.createElement("div");
       card.className = "card monitorCard";
 
@@ -563,8 +532,8 @@ async function loadMonitor() {
             <div style="font-weight:bold;font-size:22px;">${r.line} — ${r.component}</div>
             <div style="opacity:.85;font-size:16px;">Status: <span class="${statusClass(r.status)}">${r.status}</span></div>
           </div>
-          <div class="${waitingColorClass(waitSec)} timerBig">
-            ${r.status === "DELIVERED" ? "Lead" : "Wait"}: ${formatSec(waitSec)}
+          <div class="${waitingColorClass(sec)} timerBig">
+            ${frozen ? "Lead" : "Wait"}: ${formatSec(sec)}
           </div>
         </div>
       `;
@@ -576,14 +545,15 @@ async function loadMonitor() {
   render();
 
   sb.channel("monitor_requests")
-    .on("postgres_changes", { event:"*", schema:"public", table:"requests" }, () => render())
+    .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, render)
     .subscribe();
 
   setInterval(render, 2000);
 }
+
+// ====== EXPORT CSV ======
 window.downloadCSV = async () => {
-  // last 7 days, all lines by default
-  const since = new Date(Date.now() - 7*24*60*60*1000).toISOString();
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
   const { data, error } = await sb
     .from("requests")
@@ -600,9 +570,9 @@ window.downloadCSV = async () => {
     return /[",\n]/.test(s) ? `"${s}"` : s;
   };
 
-  const csv = [cols.join(","), ...(data||[]).map(r => cols.map(c => escapeCSV(r[c])).join(","))].join("\n");
+  const csv = [cols.join(","), ...(data || []).map(r => cols.map(c => escapeCSV(r[c])).join(","))].join("\n");
 
-  const blob = new Blob([csv], { type:"text/csv;charset=utf-8;" });
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -617,10 +587,3 @@ window.downloadCSV = async () => {
 if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
-
-
-
-
-
-
-
