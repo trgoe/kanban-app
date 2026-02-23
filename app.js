@@ -14,11 +14,10 @@ const app = document.getElementById("app");
 const route = location.hash || "#warehouse";
 
 // ====== AUDIO ALARM (WebAudio beep) ======
-// Browser requires a user gesture before sound. We'll unlock on first click/tap/key.
 let __audioCtx = null;
 let __audioUnlocked = false;
 
-// track which request IDs already alarmed (so we beep once on transition to RED)
+// alarm once per request when it first becomes RED (while waiting)
 const __redAlarmedIds = new Set();
 
 function ensureAudioCtx() {
@@ -45,6 +44,7 @@ window.addEventListener("pointerdown", unlockAudio, { once: true });
 window.addEventListener("keydown", unlockAudio, { once: true });
 
 function playAlarmBeep() {
+  // will be blocked until first user gesture unlocks audio
   if (!__audioUnlocked) return;
   const ctx = ensureAudioCtx();
   if (!ctx) return;
@@ -69,7 +69,6 @@ function playAlarmBeep() {
     osc.stop(t0 + dur + 0.02);
   };
 
-  // Beep-beep
   makeBeep(now + 0.0, 880, 0.12);
   makeBeep(now + 0.18, 660, 0.12);
 }
@@ -82,9 +81,33 @@ function parseTs(ts) {
   // "2026-02-13 14:30:00" -> "2026-02-13T14:30:00"
   if (s.includes(" ") && !s.includes("T")) s = s.replace(" ", "T");
 
-  // IMPORTANT: If there's no timezone info, treat it as LOCAL time (do NOT add "Z")
+  // IMPORTANT (for counters):
+  // If there's no timezone info, treat it as UTC (append Z),
+  // otherwise NEW/TAKEN can start at 60:00 if DB stores UTC without tz.
+  const hasTZ = /Z$/i.test(s) || /[+-]\d{2}:\d{2}$/.test(s);
+  if (!hasTZ) s += "Z";
+
   const d = new Date(s);
   return Number.isFinite(d.getTime()) ? d : null;
+}
+
+// Display helper: show clock "as written" (no timezone shifting)
+function fmtClockRaw(ts) {
+  if (!ts) return "-";
+  const s = String(ts).trim();
+
+  // Handles "YYYY-MM-DD HH:MM:SS"
+  const m1 = s.match(/\b(\d{2}):(\d{2})(?::\d{2})?\b/);
+  if (m1) return `${m1[1]}:${m1[2]}`;
+
+  // Handles ISO "YYYY-MM-DDTHH:MM:SS..."
+  const m2 = s.match(/T(\d{2}):(\d{2})/);
+  if (m2) return `${m2[1]}:${m2[2]}`;
+
+  // fallback
+  const d = parseTs(ts);
+  if (!d) return "-";
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function fmtDateTime(ts) {
@@ -140,6 +163,22 @@ function isRedWaiting(r, sec) {
   return isWaitingStatus(r) && sec != null && sec >= RED_AFTER_MIN * 60;
 }
 
+function maybeAlarmRed(r, sec) {
+  const id = r?.id;
+  if (!id) return;
+
+  const shouldAlarm = isRedWaiting(r, sec);
+  if (shouldAlarm) {
+    if (!__redAlarmedIds.has(id)) {
+      __redAlarmedIds.add(id);
+      playAlarmBeep();
+    }
+  } else {
+    // allow future alarm if it goes non-red / changes status away from waiting
+    __redAlarmedIds.delete(id);
+  }
+}
+
 // Freeze timer for finished states
 function calcSeconds(r) {
   const startD = parseTs(r?.requested_at);
@@ -148,8 +187,7 @@ function calcSeconds(r) {
   const start = startD.getTime();
   const st = String(r.status || "").toUpperCase();
 
-  // IMPORTANT FIX: Only use stored duration for FINISHED states,
-  // otherwise NEW/TAKEN could start at 60:00 if duration_sec has bad default data.
+  // Only use stored duration for FINISHED states
   if (
     (st === "DELIVERED" || st === "CONFIRMED" || st === "REJECTED") &&
     r.duration_sec != null &&
@@ -187,12 +225,12 @@ async function hasOpenDuplicate(line, component) {
     .select("id,status")
     .eq("line", line)
     .eq("component", component)
-    .in("status", ["NEW", "TAKEN", "DELIVERED"]) // open statuses
+    .in("status", ["NEW", "TAKEN", "DELIVERED"])
     .limit(1);
 
   if (error) {
     console.error(error);
-    return false; // don't block if unsure
+    return false;
   }
   return (data || []).length > 0;
 }
@@ -305,13 +343,10 @@ async function loadLine(line) {
         ok.className = "lineAction lineConfirm";
         ok.textContent = "CONFIRM";
         ok.onclick = async () => {
-          const { error } = await sb
-            .from("requests")
-            .update({
-              status: "CONFIRMED",
-              confirmed_at: new Date().toISOString(),
-            })
-            .eq("id", r.id);
+          const { error } = await sb.from("requests").update({
+            status: "CONFIRMED",
+            confirmed_at: new Date().toISOString(),
+          }).eq("id", r.id);
           if (error) console.error(error);
         };
 
@@ -319,13 +354,10 @@ async function loadLine(line) {
         wrong.className = "lineAction lineWrong";
         wrong.textContent = "WRONG MATERIAL";
         wrong.onclick = async () => {
-          const { error } = await sb
-            .from("requests")
-            .update({
-              status: "REJECTED",
-              confirmed_at: new Date().toISOString(),
-            })
-            .eq("id", r.id);
+          const { error } = await sb.from("requests").update({
+            status: "REJECTED",
+            confirmed_at: new Date().toISOString(),
+          }).eq("id", r.id);
           if (error) console.error(error);
         };
 
@@ -422,32 +454,15 @@ async function loadWarehouse() {
     state.daysBack = Number(rangeEl.value || 1);
   }
 
-  function maybeAlarmRed(r, sec) {
-    const shouldAlarm = isRedWaiting(r, sec);
-    const id = r?.id;
-    if (!id) return;
-
-    if (shouldAlarm) {
-      if (!__redAlarmedIds.has(id)) {
-        __redAlarmedIds.add(id);
-        playAlarmBeep();
-      }
-    } else {
-      __redAlarmedIds.delete(id);
-    }
-  }
-
   function makeCard(r) {
     const sec = calcSeconds(r);
-    maybeAlarmRed(r, sec);
 
+    // alarm + flash only for waiting statuses that are RED
+    maybeAlarmRed(r, sec);
     const flash = isRedWaiting(r, sec);
 
     const card = document.createElement("div");
     card.className = `whCard2 ${urgencyClass(sec)} ${flash ? "flashRed" : ""}`;
-
-    const req = parseTs(r.requested_at);
-    const del = parseTs(r.delivered_at);
 
     card.innerHTML = `
       <div class="whCardTop2">
@@ -463,12 +478,8 @@ async function loadWarehouse() {
       </div>
 
       <div class="whMiniTimes2">
-        <div><span class="muted2">Req</span> ${
-          req ? req.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"
-        }</div>
-        <div><span class="muted2">Del</span> ${
-          del ? del.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"
-        }</div>
+        <div><span class="muted2">Req</span> ${fmtClockRaw(r.requested_at)}</div>
+        <div><span class="muted2">Del</span> ${fmtClockRaw(r.delivered_at)}</div>
       </div>
 
       <div class="whBtns2" id="btns-${r.id}"></div>
@@ -497,8 +508,7 @@ async function loadWarehouse() {
   async function render() {
     readState();
 
-    const daysBack = state.daysBack;
-    const since = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+    const since = new Date(Date.now() - state.daysBack * 24 * 60 * 60 * 1000).toISOString();
 
     let q = sb
       .from("requests")
@@ -542,24 +552,26 @@ async function loadWarehouse() {
   }
 
   window.take = async (id) => {
-    const { error } = await sb
-      .from("requests")
-      .update({
-        status: "TAKEN",
-        taken_at: new Date().toISOString(),
-      })
-      .eq("id", id);
+    const { error } = await sb.from("requests").update({
+      status: "TAKEN",
+      taken_at: new Date().toISOString(),
+    }).eq("id", id);
     if (error) console.error(error);
   };
 
   window.deliver = async (id) => {
-    const { data, error } = await sb.from("requests").select("requested_at").eq("id", id).single();
+    const { data, error } = await sb
+      .from("requests")
+      .select("requested_at")
+      .eq("id", id)
+      .single();
+
     if (error || !data) {
       console.error(error);
       return;
     }
 
-    // IMPORTANT: use parseTs to avoid timezone jumps
+    // IMPORTANT: compute duration with SAME parser as calcSeconds()
     const startD = parseTs(data.requested_at);
     if (!startD) {
       console.error("Bad requested_at", data.requested_at);
@@ -570,27 +582,22 @@ async function loadWarehouse() {
     const now = Date.now();
     const duration = Math.max(0, Math.floor((now - start) / 1000));
 
-    const { error: updErr } = await sb
-      .from("requests")
-      .update({
-        status: "DELIVERED",
-        delivered_at: new Date(now).toISOString(),
-        duration_sec: duration,
-      })
-      .eq("id", id);
+    const { error: updErr } = await sb.from("requests").update({
+      status: "DELIVERED",
+      delivered_at: new Date(now).toISOString(),
+      duration_sec: duration,
+    }).eq("id", id);
+
     if (updErr) console.error(updErr);
   };
 
-  // Export CSV (simple, last range)
   window.downloadCSV = async () => {
     readState();
     const since = new Date(Date.now() - state.daysBack * 24 * 60 * 60 * 1000).toISOString();
 
     let q = sb
       .from("requests")
-      .select(
-        "id,line,component,qty,unit,status,priority,requested_at,taken_at,delivered_at,confirmed_at,duration_sec"
-      )
+      .select("id,line,component,qty,unit,status,priority,requested_at,taken_at,delivered_at,confirmed_at,duration_sec")
       .gte("requested_at", since)
       .order("requested_at", { ascending: true });
 
@@ -603,33 +610,20 @@ async function loadWarehouse() {
       return;
     }
 
-    const cols = [
-      "id",
-      "line",
-      "component",
-      "qty",
-      "unit",
-      "status",
-      "priority",
-      "requested_at",
-      "taken_at",
-      "delivered_at",
-      "confirmed_at",
-      "duration_sec",
-    ];
+    const cols = ["id","line","component","qty","unit","status","priority","requested_at","taken_at","delivered_at","confirmed_at","duration_sec"];
     const esc = (v) => {
       if (v == null) return "";
-      const s = String(v).replace(/"/g, '""');
+      const s = String(v).replace(/"/g,'""');
       return /[",\n]/.test(s) ? `"${s}"` : s;
     };
-    const rows = data || [];
-    const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n");
+    const rows = (data || []);
+    const csv = [cols.join(","), ...rows.map(r => cols.map(c => esc(r[c])).join(","))].join("\n");
 
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob([csv], { type:"text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `kanban_${state.line}_${state.daysBack}d_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `kanban_${state.line}_${state.daysBack}d_${new Date().toISOString().slice(0,10)}.csv`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -645,7 +639,7 @@ async function loadWarehouse() {
   render();
 
   sb.channel("warehouse_requests")
-    .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, render)
+    .on("postgres_changes", { event:"*", schema:"public", table:"requests" }, render)
     .subscribe();
 
   setInterval(render, 2000);
@@ -664,39 +658,21 @@ async function loadMonitor() {
 
   const el = document.getElementById("monitorRows");
 
-  function maybeAlarmRed(r, sec) {
-    const shouldAlarm = isRedWaiting(r, sec);
-    const id = r?.id;
-    if (!id) return;
-
-    if (shouldAlarm) {
-      if (!__redAlarmedIds.has(id)) {
-        __redAlarmedIds.add(id);
-        playAlarmBeep();
-      }
-    } else {
-      __redAlarmedIds.delete(id);
-    }
-  }
-
   async function render() {
-    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const since = new Date(Date.now() - 7*24*60*60*1000).toISOString();
 
     const { data, error } = await sb
       .from("requests")
       .select("*")
       .gte("requested_at", since)
-      .neq("status", "CONFIRMED")
+      .neq("status","CONFIRMED")
       .order("requested_at", { ascending: true });
 
-    if (error) {
-      console.error(error);
-      return;
-    }
+    if (error) { console.error(error); return; }
 
     const items = (data || [])
-      .map((r) => ({ r, sec: calcSeconds(r) }))
-      .sort((a, b) => (b.sec || 0) - (a.sec || 0));
+      .map(r => ({ r, sec: calcSeconds(r) }))
+      .sort((a,b)=>(b.sec||0)-(a.sec||0));
 
     el.innerHTML = "";
     items.forEach(({ r, sec }) => {
@@ -712,11 +688,7 @@ async function loadMonitor() {
             <div style="opacity:.85;font-size:16px;">Status: <span class="${statusClass(r.status)}">${r.status}</span></div>
           </div>
           <div class="${waitingColorClass(sec)} timerBig">
-            ${
-              ["DELIVERED", "CONFIRMED", "REJECTED"].includes(String(r.status || "").toUpperCase())
-                ? "Lead"
-                : "Wait"
-            }: ${formatSec(sec)}
+            ${isWaitingStatus(r) ? "Wait" : "Lead"}: ${formatSec(sec)}
           </div>
         </div>
       `;
@@ -727,7 +699,7 @@ async function loadMonitor() {
   render();
 
   sb.channel("monitor_requests")
-    .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, render)
+    .on("postgres_changes", { event:"*", schema:"public", table:"requests" }, render)
     .subscribe();
 
   setInterval(render, 2000);
