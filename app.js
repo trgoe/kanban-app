@@ -449,20 +449,29 @@ async function loadWarehouse() {
   };
 
   window.deliver = async (id) => {
-    const { data, error } = await sb.from("requests").select("requested_at").eq("id", id).single();
-    if(error || !data){ console.error(error); return; }
+  const { data, error } = await sb
+    .from("requests")
+    .select("requested_at")
+    .eq("id", id)
+    .single();
 
-    const start = new Date(data.requested_at).getTime();
-    const now = Date.now();
-    const duration = Math.max(0, Math.floor((now - start)/1000));
+  if (error || !data) { console.error(error); return; }
 
-    const { error: updErr } = await sb.from("requests").update({
-      status:"DELIVERED",
-      delivered_at: new Date(now).toISOString(),
-      duration_sec: duration
-    }).eq("id", id);
-    if(updErr) console.error(updErr);
-  };
+  const startD = parseTs(data.requested_at);
+  if (!startD) { console.error("Bad requested_at", data.requested_at); return; }
+
+  const start = startD.getTime();
+  const now = Date.now();
+  const duration = Math.max(0, Math.floor((now - start) / 1000));
+
+  const { error: updErr } = await sb.from("requests").update({
+    status: "DELIVERED",
+    delivered_at: new Date(now).toISOString(),
+    duration_sec: duration
+  }).eq("id", id);
+
+  if (updErr) console.error(updErr);
+};
 
   // Export CSV (simple, last range)
   window.downloadCSV = async () => {
@@ -576,4 +585,5 @@ async function loadMonitor() {
 if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
+
 
