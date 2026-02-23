@@ -2,7 +2,8 @@ console.log("app.js loaded");
 
 // ====== CONFIG ======
 const SUPABASE_URL = "https://xopxxznvaorhvqucamve.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhvcHh4em52YW9yaHZxdWNhbXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA4MDczNzEsImV4cCI6MjA4NjM4MzM3MX0.cF4zK8lrFWAURnVui_7V7ZweAgJxlEn4nyxH7qKGgko";
+const SUPABASE_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhvcHh4em52YW9yaHZxdWNhbXZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA4MDczNzEsImV4cCI6MjA4NjM4MzM3MX0.cF4zK8lrFWAURnVui_7V7ZweAgJxlEn4nyxH7qKGgko";
 
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
@@ -12,6 +13,72 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 const route = location.hash || "#warehouse";
 
+// ====== AUDIO ALARM (WebAudio beep) ======
+// Browser requires a user gesture before sound. We'll unlock on first click/tap/key.
+let __audioCtx = null;
+let __audioUnlocked = false;
+
+// track which request IDs are currently "alarming" so we only beep once on transition to RED
+const __redAlarmedIds = new Set();
+
+function ensureAudioCtx() {
+  if (!__audioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    __audioCtx = new Ctx();
+  }
+  return __audioCtx;
+}
+
+async function unlockAudio() {
+  const ctx = ensureAudioCtx();
+  if (!ctx) return;
+  try {
+    if (ctx.state === "suspended") await ctx.resume();
+    __audioUnlocked = true;
+  } catch (e) {
+    // ignore
+  }
+}
+
+// Unlock audio on first gesture
+window.addEventListener("pointerdown", unlockAudio, { once: true });
+window.addEventListener("keydown", unlockAudio, { once: true });
+
+function playAlarmBeep() {
+  // If user didn't interact yet, browser will block. We just skip quietly.
+  if (!__audioUnlocked) return;
+
+  const ctx = ensureAudioCtx();
+  if (!ctx) return;
+
+  // short double-beep
+  const now = ctx.currentTime;
+
+  const makeBeep = (t0, freq = 880, dur = 0.12) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = "square";
+    osc.frequency.setValueAtTime(freq, t0);
+
+    // envelope
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.25, t0 + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.02);
+  };
+
+  // Beep-beep pattern
+  makeBeep(now + 0.00, 880, 0.12);
+  makeBeep(now + 0.18, 660, 0.12);
+}
+
 // ====== HELPERS ======
 function parseTs(ts) {
   if (!ts) return null;
@@ -20,7 +87,7 @@ function parseTs(ts) {
   // "2026-02-13 14:30:00" -> "2026-02-13T14:30:00"
   if (s.includes(" ") && !s.includes("T")) s = s.replace(" ", "T");
 
-  // If there's no timezone info, treat it as LOCAL time (do NOT add "Z")
+  // IMPORTANT: If there's no timezone info, treat it as LOCAL time (do NOT add "Z")
   const d = new Date(s);
   return Number.isFinite(d.getTime()) ? d : null;
 }
@@ -52,10 +119,10 @@ function waitingColorClass(waitSec) {
   return "w-green";
 }
 
-function urgencyClass(sec){
+function urgencyClass(sec) {
   if (sec == null) return "";
-  if (sec >= RED_AFTER_MIN*60) return "uRed";
-  if (sec >= YELLOW_AFTER_MIN*60) return "uYellow";
+  if (sec >= RED_AFTER_MIN * 60) return "uRed";
+  if (sec >= YELLOW_AFTER_MIN * 60) return "uYellow";
   return "uGreen";
 }
 
@@ -69,8 +136,17 @@ function statusClass(status) {
   return "";
 }
 
+function isWaitingStatus(r) {
+  const st = String(r?.status || "").toUpperCase();
+  return st === "NEW" || st === "TAKEN";
+}
+
+function isRedWaiting(r, sec) {
+  return isWaitingStatus(r) && sec != null && sec >= RED_AFTER_MIN * 60;
+}
+
 // Freeze timer for finished states
-function calcSeconds(r){
+function calcSeconds(r) {
   const startD = parseTs(r?.requested_at);
   if (!startD) return null;
 
@@ -89,7 +165,11 @@ function calcSeconds(r){
   if ((st === "CONFIRMED" || st === "REJECTED") && r.confirmed_at) {
     stopD = parseTs(r.confirmed_at);
   }
-  if (!stopD && (st === "DELIVERED" || st === "CONFIRMED" || st === "REJECTED") && r.delivered_at) {
+  if (
+    !stopD &&
+    (st === "DELIVERED" || st === "CONFIRMED" || st === "REJECTED") &&
+    r.delivered_at
+  ) {
     stopD = parseTs(r.delivered_at);
   }
 
@@ -108,12 +188,12 @@ async function hasOpenDuplicate(line, component) {
     .select("id,status")
     .eq("line", line)
     .eq("component", component)
-    .in("status", ["NEW", "TAKEN", "DELIVERED"])
+    .in("status", ["NEW", "TAKEN", "DELIVERED"]) // open statuses
     .limit(1);
 
   if (error) {
     console.error(error);
-    return false;
+    return false; // don't block if unsure
   }
   return (data || []).length > 0;
 }
@@ -143,7 +223,7 @@ async function loadLine(line) {
 
   if (compErr) console.error(compErr);
 
-  (comps || []).forEach(c => {
+  (comps || []).forEach((c) => {
     const btn = document.createElement("button");
     btn.className = "lineBtn";
     btn.innerHTML = `
@@ -158,6 +238,7 @@ async function loadLine(line) {
         return;
       }
 
+      // IMPORTANT: set requested_at on client so timer starts at 00:00 immediately
       const { error } = await sb.from("requests").insert({
         line,
         component: c.component,
@@ -189,9 +270,11 @@ async function loadLine(line) {
     if (error) console.error(error);
 
     myRequests.innerHTML = "";
-    (data || []).forEach(r => {
+    (data || []).forEach((r) => {
       const sec = calcSeconds(r);
-      const stopped = ["DELIVERED","CONFIRMED","REJECTED"].includes(String(r.status||"").toUpperCase());
+      const stopped = ["DELIVERED", "CONFIRMED", "REJECTED"].includes(
+        String(r.status || "").toUpperCase()
+      );
       const label = stopped ? "Lead" : "Wait";
 
       const card = document.createElement("div");
@@ -224,10 +307,13 @@ async function loadLine(line) {
         ok.className = "lineAction lineConfirm";
         ok.textContent = "CONFIRM";
         ok.onclick = async () => {
-          const { error } = await sb.from("requests").update({
-            status: "CONFIRMED",
-            confirmed_at: new Date().toISOString(),
-          }).eq("id", r.id);
+          const { error } = await sb
+            .from("requests")
+            .update({
+              status: "CONFIRMED",
+              confirmed_at: new Date().toISOString(),
+            })
+            .eq("id", r.id);
           if (error) console.error(error);
         };
 
@@ -235,10 +321,13 @@ async function loadLine(line) {
         wrong.className = "lineAction lineWrong";
         wrong.textContent = "WRONG MATERIAL";
         wrong.onclick = async () => {
-          const { error } = await sb.from("requests").update({
-            status: "REJECTED",
-            confirmed_at: new Date().toISOString(),
-          }).eq("id", r.id);
+          const { error } = await sb
+            .from("requests")
+            .update({
+              status: "REJECTED",
+              confirmed_at: new Date().toISOString(),
+            })
+            .eq("id", r.id);
           if (error) console.error(error);
         };
 
@@ -253,88 +342,413 @@ async function loadLine(line) {
   }
 
   refreshMy();
+
+  sb.channel(`line_${line}`)
+    .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, (payload) => {
+      if (payload.new?.line === line) refreshMy();
+    })
+    .subscribe();
+
+  // update timers
   setInterval(refreshMy, 2000);
 }
 
 // ====== WAREHOUSE SCREEN ======
 async function loadWarehouse() {
-  const state = { q:"", line:"ALL", daysBack:1 };
+  const state = { q: "", line: "ALL", daysBack: 1 };
 
   app.innerHTML = `
     <div class="header">WAREHOUSE</div>
+
     <div class="whTopbar">
       <input id="search" class="whInput" placeholder="Search component..." />
       <select id="lineFilter" class="whInput">
         <option value="ALL">All lines</option>
-        ${Array.from({length:9},(_,i)=>`<option value="L${i+1}">L${i+1}</option>`).join("")}
+        ${Array.from({ length: 9 }, (_, i) => `<option value="L${i + 1}">L${i + 1}</option>`).join("")}
       </select>
       <select id="rangeFilter" class="whInput">
         <option value="1">Today</option>
         <option value="7">7 days</option>
         <option value="30">30 days</option>
       </select>
+
       <button id="btnExport" class="whBtn whBtnBlue">Export CSV</button>
       <a href="#monitor" class="whBtn whBtnGhost">Monitor</a>
     </div>
+
     <div class="whBoard">
-      <div class="whCol"><div class="whColHead"><div class="whColTitle">NEW</div><div class="whColCount" id="countNEW">0</div></div><div class="whColBody" id="colNEW"></div></div>
-      <div class="whCol"><div class="whColHead"><div class="whColTitle">TAKEN</div><div class="whColCount" id="countTAKEN">0</div></div><div class="whColBody" id="colTAKEN"></div></div>
-      <div class="whCol"><div class="whColHead"><div class="whColTitle">DELIVERED</div><div class="whColCount" id="countDELIVERED">0</div></div><div class="whColBody" id="colDELIVERED"></div></div>
+      <div class="whCol">
+        <div class="whColHead">
+          <div class="whColTitle">NEW</div>
+          <div class="whColHint">Pick these first</div>
+          <div class="whColCount" id="countNEW">0</div>
+        </div>
+        <div class="whColBody" id="colNEW"></div>
+      </div>
+
+      <div class="whCol">
+        <div class="whColHead">
+          <div class="whColTitle">TAKEN</div>
+          <div class="whColHint">Preparing / on the way</div>
+          <div class="whColCount" id="countTAKEN">0</div>
+        </div>
+        <div class="whColBody" id="colTAKEN"></div>
+      </div>
+
+      <div class="whCol">
+        <div class="whColHead">
+          <div class="whColTitle">DELIVERED</div>
+          <div class="whColHint">Waiting line confirmation</div>
+          <div class="whColCount" id="countDELIVERED">0</div>
+        </div>
+        <div class="whColBody" id="colDELIVERED"></div>
+      </div>
     </div>
   `;
 
-  async function render(){
-    const { data, error } = await sb.from("requests").select("*").in("status", ["NEW","TAKEN","DELIVERED"]).order("requested_at", {ascending:true});
-    if(error){ console.error(error); return; }
+  const searchEl = document.getElementById("search");
+  const lineEl = document.getElementById("lineFilter");
+  const rangeEl = document.getElementById("rangeFilter");
+  const exportBtn = document.getElementById("btnExport");
 
-    const byStatus = { NEW:[], TAKEN:[], DELIVERED:[] };
-    (data||[]).forEach(r => byStatus[r.status]?.push(r));
+  const colNEW = document.getElementById("colNEW");
+  const colTAKEN = document.getElementById("colTAKEN");
+  const colDEL = document.getElementById("colDELIVERED");
 
-    const colNEW = document.getElementById("colNEW");
-    const colTAKEN = document.getElementById("colTAKEN");
-    const colDEL = document.getElementById("colDELIVERED");
+  const countNEW = document.getElementById("countNEW");
+  const countTAKEN = document.getElementById("countTAKEN");
+  const countDEL = document.getElementById("countDELIVERED");
+
+  function readState() {
+    state.q = searchEl.value || "";
+    state.line = lineEl.value || "ALL";
+    state.daysBack = Number(rangeEl.value || 1);
+  }
+
+  function waitingSecWarehouse(r) {
+    // In WH view, delivered cards show lead time frozen
+    return calcSeconds(r);
+  }
+
+  function maybeAlarmRed(r, sec) {
+    // alarm only for waiting (NEW/TAKEN) and only once on transition to RED
+    const shouldAlarm = isRedWaiting(r, sec);
+    const id = r?.id;
+
+    if (!id) return;
+
+    if (shouldAlarm) {
+      if (!__redAlarmedIds.has(id)) {
+        __redAlarmedIds.add(id);
+        playAlarmBeep();
+      }
+    } else {
+      // if it drops below red or status changes away from waiting, allow future alarm again
+      __redAlarmedIds.delete(id);
+    }
+  }
+
+  function makeCard(r) {
+    const sec = waitingSecWarehouse(r);
+
+    // trigger sound alarm if it just turned red (waiting)
+    maybeAlarmRed(r, sec);
+
+    const flash = isRedWaiting(r, sec);
+
+    const card = document.createElement("div");
+    card.className = `whCard2 ${urgencyClass(sec)} ${flash ? "flashRed" : ""}`;
+
+    const req = parseTs(r.requested_at);
+    const del = parseTs(r.delivered_at);
+
+    card.innerHTML = `
+      <div class="whCardTop2">
+        <div class="whLinePill">${r.line}</div>
+        <div class="whTimeBig">${formatSec(sec)}</div>
+      </div>
+
+      <div class="whComp2">${r.component}</div>
+
+      <div class="whSub2">
+        <div><span class="muted2">Qty</span> <b>${r.qty ?? 1}</b> ${r.unit ?? ""}</div>
+        <div class="muted2">${r.status}</div>
+      </div>
+
+      <div class="whMiniTimes2">
+        <div><span class="muted2">Req</span> ${
+          req ? req.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"
+        }</div>
+        <div><span class="muted2">Del</span> ${
+          del ? del.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"
+        }</div>
+      </div>
+
+      <div class="whBtns2" id="btns-${r.id}"></div>
+    `;
+
+    const btns = card.querySelector(`#btns-${r.id}`);
+
+    const takeBtn = document.createElement("button");
+    takeBtn.className = "whBigBtn whTake";
+    takeBtn.textContent = "TAKE";
+    takeBtn.disabled = String(r.status).toUpperCase() !== "NEW";
+    takeBtn.onclick = () => window.take(r.id);
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "whBigBtn whDel";
+    delBtn.textContent = "DELIVER";
+    delBtn.disabled = String(r.status).toUpperCase() === "DELIVERED";
+    delBtn.onclick = () => window.deliver(r.id);
+
+    btns.appendChild(takeBtn);
+    btns.appendChild(delBtn);
+
+    return card;
+  }
+
+  async function render() {
+    readState();
+
+    const daysBack = state.daysBack;
+    const since = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+
+    let q = sb
+      .from("requests")
+      .select("*")
+      .gte("requested_at", since)
+      .in("status", ["NEW", "TAKEN", "DELIVERED"])
+      .order("requested_at", { ascending: true });
+
+    if (state.line !== "ALL") q = q.eq("line", state.line);
+
+    const { data, error } = await q;
+    if (error) {
+      console.error(error);
+      return;
+    }
+
+    let rows = data || [];
+    if (state.q.trim()) {
+      const needle = state.q.trim().toLowerCase();
+      rows = rows.filter((r) => String(r.component || "").toLowerCase().includes(needle));
+    }
+
+    const byStatus = { NEW: [], TAKEN: [], DELIVERED: [] };
+    rows.forEach((r) => byStatus[r.status]?.push(r));
+
+    ["NEW", "TAKEN", "DELIVERED"].forEach((st) => {
+      byStatus[st].sort((a, b) => (calcSeconds(b) || 0) - (calcSeconds(a) || 0));
+    });
 
     colNEW.innerHTML = "";
     colTAKEN.innerHTML = "";
     colDEL.innerHTML = "";
 
-    byStatus.NEW.forEach(r => colNEW.appendChild(document.createTextNode(r.component)));
-    byStatus.TAKEN.forEach(r => colTAKEN.appendChild(document.createTextNode(r.component)));
-    byStatus.DELIVERED.forEach(r => colDEL.appendChild(document.createTextNode(r.component)));
+    byStatus.NEW.forEach((r) => colNEW.appendChild(makeCard(r)));
+    byStatus.TAKEN.forEach((r) => colTAKEN.appendChild(makeCard(r)));
+    byStatus.DELIVERED.forEach((r) => colDEL.appendChild(makeCard(r)));
 
-    document.getElementById("countNEW").textContent = byStatus.NEW.length;
-    document.getElementById("countTAKEN").textContent = byStatus.TAKEN.length;
-    document.getElementById("countDELIVERED").textContent = byStatus.DELIVERED.length;
+    countNEW.textContent = byStatus.NEW.length;
+    countTAKEN.textContent = byStatus.TAKEN.length;
+    countDEL.textContent = byStatus.DELIVERED.length;
   }
+
+  window.take = async (id) => {
+    const { error } = await sb
+      .from("requests")
+      .update({
+        status: "TAKEN",
+        taken_at: new Date().toISOString(),
+      })
+      .eq("id", id);
+    if (error) console.error(error);
+  };
 
   window.deliver = async (id) => {
     const { data, error } = await sb.from("requests").select("requested_at").eq("id", id).single();
-    if(error || !data){ console.error(error); return; }
+    if (error || !data) {
+      console.error(error);
+      return;
+    }
 
+    // IMPORTANT: use parseTs to avoid timezone jumps
     const startD = parseTs(data.requested_at);
-    if (!startD) { console.error("Bad requested_at"); return; }
+    if (!startD) {
+      console.error("Bad requested_at", data.requested_at);
+      return;
+    }
 
     const start = startD.getTime();
     const now = Date.now();
-    const duration = Math.max(0, Math.floor((now - start)/1000));
+    const duration = Math.max(0, Math.floor((now - start) / 1000));
 
-    const { error: updErr } = await sb.from("requests").update({
-      status:"DELIVERED",
-      delivered_at: new Date(now).toISOString(),
-      duration_sec: duration
-    }).eq("id", id);
-    if(updErr) console.error(updErr);
+    const { error: updErr } = await sb
+      .from("requests")
+      .update({
+        status: "DELIVERED",
+        delivered_at: new Date(now).toISOString(),
+        duration_sec: duration,
+      })
+      .eq("id", id);
+    if (updErr) console.error(updErr);
   };
 
+  // Export CSV (simple, last range)
+  window.downloadCSV = async () => {
+    readState();
+    const since = new Date(Date.now() - state.daysBack * 24 * 60 * 60 * 1000).toISOString();
+
+    let q = sb
+      .from("requests")
+      .select(
+        "id,line,component,qty,unit,status,priority,requested_at,taken_at,delivered_at,confirmed_at,duration_sec"
+      )
+      .gte("requested_at", since)
+      .order("requested_at", { ascending: true });
+
+    if (state.line && state.line !== "ALL") q = q.eq("line", state.line);
+
+    const { data, error } = await q;
+    if (error) {
+      console.error(error);
+      alert("Export failed");
+      return;
+    }
+
+    const cols = [
+      "id",
+      "line",
+      "component",
+      "qty",
+      "unit",
+      "status",
+      "priority",
+      "requested_at",
+      "taken_at",
+      "delivered_at",
+      "confirmed_at",
+      "duration_sec",
+    ];
+    const esc = (v) => {
+      if (v == null) return "";
+      const s = String(v).replace(/"/g, '""');
+      return /[",\n]/.test(s) ? `"${s}"` : s;
+    };
+    const rows = data || [];
+    const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n");
+
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `kanban_${state.line}_${state.daysBack}d_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  exportBtn.onclick = () => window.downloadCSV();
+
+  searchEl.addEventListener("input", render);
+  lineEl.addEventListener("change", render);
+  rangeEl.addEventListener("change", render);
+
   render();
+
+  sb.channel("warehouse_requests")
+    .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, render)
+    .subscribe();
+
+  setInterval(render, 2000);
 }
 
 // ====== MONITOR SCREEN ======
 async function loadMonitor() {
-  app.innerHTML = `<div class="header">MONITOR</div><div id="monitorRows"></div>`;
+  app.innerHTML = `
+    <div class="header">MONITOR</div>
+    <div class="toolbar">
+      <a href="#warehouse" class="linkBtn">Warehouse</a>
+      <div style="opacity:.85;">Yellow ≥ ${YELLOW_AFTER_MIN} min | Red ≥ ${RED_AFTER_MIN} min</div>
+    </div>
+    <div id="monitorRows"></div>
+  `;
+
+  const el = document.getElementById("monitorRows");
+
+  function maybeAlarmRed(r, sec) {
+    const shouldAlarm = isRedWaiting(r, sec);
+    const id = r?.id;
+    if (!id) return;
+
+    if (shouldAlarm) {
+      if (!__redAlarmedIds.has(id)) {
+        __redAlarmedIds.add(id);
+        playAlarmBeep();
+      }
+    } else {
+      __redAlarmedIds.delete(id);
+    }
+  }
+
+  async function render() {
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    const { data, error } = await sb
+      .from("requests")
+      .select("*")
+      .gte("requested_at", since)
+      .neq("status", "CONFIRMED")
+      .order("requested_at", { ascending: true });
+
+    if (error) {
+      console.error(error);
+      return;
+    }
+
+    const items = (data || [])
+      .map((r) => ({ r, sec: calcSeconds(r) }))
+      .sort((a, b) => (b.sec || 0) - (a.sec || 0));
+
+    el.innerHTML = "";
+    items.forEach(({ r, sec }) => {
+      // sound alarm (only once on transition to RED while waiting)
+      maybeAlarmRed(r, sec);
+
+      const flash = isRedWaiting(r, sec);
+
+      const card = document.createElement("div");
+      card.className = `card monitorCard ${flash ? "flashRed" : ""}`;
+      card.innerHTML = `
+        <div class="rowTop">
+          <div>
+            <div style="font-weight:bold;font-size:22px;">${r.line} — ${r.component}</div>
+            <div style="opacity:.85;font-size:16px;">Status: <span class="${statusClass(r.status)}">${r.status}</span></div>
+          </div>
+          <div class="${waitingColorClass(sec)} timerBig">
+            ${
+              ["DELIVERED", "CONFIRMED", "REJECTED"].includes(String(r.status || "").toUpperCase())
+                ? "Lead"
+                : "Wait"
+            }: ${formatSec(sec)}
+          </div>
+        </div>
+      `;
+      el.appendChild(card);
+    });
+  }
+
+  render();
+
+  sb.channel("monitor_requests")
+    .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, render)
+    .subscribe();
+
+  setInterval(render, 2000);
 }
 
 // ====== ROUTING ======
-if (route.startsWith("#line/")) loadLine(route.split("/")[1]);
+if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
