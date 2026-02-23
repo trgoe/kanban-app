@@ -18,7 +18,7 @@ const route = location.hash || "#warehouse";
 let __audioCtx = null;
 let __audioUnlocked = false;
 
-// track which request IDs are currently "alarming" so we only beep once on transition to RED
+// track which request IDs already alarmed (so we beep once on transition to RED)
 const __redAlarmedIds = new Set();
 
 function ensureAudioCtx() {
@@ -36,23 +36,19 @@ async function unlockAudio() {
   try {
     if (ctx.state === "suspended") await ctx.resume();
     __audioUnlocked = true;
-  } catch (e) {
+  } catch {
     // ignore
   }
 }
 
-// Unlock audio on first gesture
 window.addEventListener("pointerdown", unlockAudio, { once: true });
 window.addEventListener("keydown", unlockAudio, { once: true });
 
 function playAlarmBeep() {
-  // If user didn't interact yet, browser will block. We just skip quietly.
   if (!__audioUnlocked) return;
-
   const ctx = ensureAudioCtx();
   if (!ctx) return;
 
-  // short double-beep
   const now = ctx.currentTime;
 
   const makeBeep = (t0, freq = 880, dur = 0.12) => {
@@ -62,7 +58,6 @@ function playAlarmBeep() {
     osc.type = "square";
     osc.frequency.setValueAtTime(freq, t0);
 
-    // envelope
     gain.gain.setValueAtTime(0.0001, t0);
     gain.gain.exponentialRampToValueAtTime(0.25, t0 + 0.01);
     gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
@@ -74,8 +69,8 @@ function playAlarmBeep() {
     osc.stop(t0 + dur + 0.02);
   };
 
-  // Beep-beep pattern
-  makeBeep(now + 0.00, 880, 0.12);
+  // Beep-beep
+  makeBeep(now + 0.0, 880, 0.12);
   makeBeep(now + 0.18, 660, 0.12);
 }
 
@@ -151,13 +146,17 @@ function calcSeconds(r) {
   if (!startD) return null;
 
   const start = startD.getTime();
+  const st = String(r.status || "").toUpperCase();
 
-  // best: stored duration (already frozen)
-  if (r.duration_sec != null && Number.isFinite(Number(r.duration_sec))) {
+  // IMPORTANT FIX: Only use stored duration for FINISHED states,
+  // otherwise NEW/TAKEN could start at 60:00 if duration_sec has bad default data.
+  if (
+    (st === "DELIVERED" || st === "CONFIRMED" || st === "REJECTED") &&
+    r.duration_sec != null &&
+    Number.isFinite(Number(r.duration_sec))
+  ) {
     return Number(r.duration_sec);
   }
-
-  const st = String(r.status || "").toUpperCase();
 
   // stop time preference: confirmed > delivered
   let stopD = null;
@@ -238,7 +237,6 @@ async function loadLine(line) {
         return;
       }
 
-      // IMPORTANT: set requested_at on client so timer starts at 00:00 immediately
       const { error } = await sb.from("requests").insert({
         line,
         component: c.component,
@@ -349,7 +347,6 @@ async function loadLine(line) {
     })
     .subscribe();
 
-  // update timers
   setInterval(refreshMy, 2000);
 }
 
@@ -425,16 +422,9 @@ async function loadWarehouse() {
     state.daysBack = Number(rangeEl.value || 1);
   }
 
-  function waitingSecWarehouse(r) {
-    // In WH view, delivered cards show lead time frozen
-    return calcSeconds(r);
-  }
-
   function maybeAlarmRed(r, sec) {
-    // alarm only for waiting (NEW/TAKEN) and only once on transition to RED
     const shouldAlarm = isRedWaiting(r, sec);
     const id = r?.id;
-
     if (!id) return;
 
     if (shouldAlarm) {
@@ -443,15 +433,12 @@ async function loadWarehouse() {
         playAlarmBeep();
       }
     } else {
-      // if it drops below red or status changes away from waiting, allow future alarm again
       __redAlarmedIds.delete(id);
     }
   }
 
   function makeCard(r) {
-    const sec = waitingSecWarehouse(r);
-
-    // trigger sound alarm if it just turned red (waiting)
+    const sec = calcSeconds(r);
     maybeAlarmRed(r, sec);
 
     const flash = isRedWaiting(r, sec);
@@ -713,9 +700,7 @@ async function loadMonitor() {
 
     el.innerHTML = "";
     items.forEach(({ r, sec }) => {
-      // sound alarm (only once on transition to RED while waiting)
       maybeAlarmRed(r, sec);
-
       const flash = isRedWaiting(r, sec);
 
       const card = document.createElement("div");
