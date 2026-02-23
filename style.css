@@ -553,6 +553,36 @@ body{font-family:Arial;margin:0;background:#111;color:#fff}
 .lineConfirm{ background:#4caf50; color:#fff; }
 .lineWrong{ background:#ff4d4d; color:#fff; }
 
+/* ===== RED FLASH (whole rectangle) ===== */
+.flashRed{
+  background:#b30000 !important;
+  border:2px solid #ff3b3b !important;
+  color:#fff !important;
+  animation: flashRedPulse 0.8s infinite;
+}
+
+/* keep text readable even if it's using muted styles */
+.flashRed .muted2,
+.flashRed .muted,
+.flashRed .whSub2,
+.flashRed .whMiniTimes2,
+.flashRed .whComp2,
+.flashRed .whLinePill,
+.flashRed .timerBig,
+.flashRed span,
+.flashRed div{
+  color: rgba(255,255,255,0.95) !important;
+  opacity: 1 !important;
+}
+
+/* nice pulse */
+@keyframes flashRedPulse{
+  0%   { filter: brightness(0.95); }
+  50%  { filter: brightness(1.18); }
+  100% { filter: brightness(0.95); }
+}
+
+
 
 
 
