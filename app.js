@@ -20,14 +20,10 @@ function parseTs(ts) {
   // "2026-02-13 14:30:00" -> "2026-02-13T14:30:00"
   if (s.includes(" ") && !s.includes("T")) s = s.replace(" ", "T");
 
-  // If there's no timezone info, treat it as UTC
-  const hasTZ = /Z$/i.test(s) || /[+-]\d{2}:\d{2}$/.test(s);
-  if (!hasTZ) s += "Z";
-
+  // If there's no timezone info, treat it as LOCAL time (do NOT add "Z")
   const d = new Date(s);
   return Number.isFinite(d.getTime()) ? d : null;
 }
-
 
 function fmtDateTime(ts) {
   const d = parseTs(ts);
@@ -105,7 +101,6 @@ function calcSeconds(r){
   return Math.max(0, Math.floor((Date.now() - start) / 1000));
 }
 
-
 // ====== DUPLICATE PROTECTION ======
 async function hasOpenDuplicate(line, component) {
   const { data, error } = await sb
@@ -113,12 +108,12 @@ async function hasOpenDuplicate(line, component) {
     .select("id,status")
     .eq("line", line)
     .eq("component", component)
-    .in("status", ["NEW", "TAKEN", "DELIVERED"]) // open statuses
+    .in("status", ["NEW", "TAKEN", "DELIVERED"])
     .limit(1);
 
   if (error) {
     console.error(error);
-    return false; // don't block if unsure
+    return false;
   }
   return (data || []).length > 0;
 }
@@ -163,7 +158,6 @@ async function loadLine(line) {
         return;
       }
 
-      // IMPORTANT: set requested_at on client so timer starts at 00:00 immediately
       const { error } = await sb.from("requests").insert({
         line,
         component: c.component,
@@ -259,14 +253,6 @@ async function loadLine(line) {
   }
 
   refreshMy();
-
-  sb.channel(`line_${line}`)
-    .on("postgres_changes", { event: "*", schema: "public", table: "requests" }, (payload) => {
-      if (payload.new?.line === line) refreshMy();
-    })
-    .subscribe();
-
-  // update timers
   setInterval(refreshMy, 2000);
 }
 
@@ -276,7 +262,6 @@ async function loadWarehouse() {
 
   app.innerHTML = `
     <div class="header">WAREHOUSE</div>
-
     <div class="whTopbar">
       <input id="search" class="whInput" placeholder="Search component..." />
       <select id="lineFilter" class="whInput">
@@ -288,302 +273,68 @@ async function loadWarehouse() {
         <option value="7">7 days</option>
         <option value="30">30 days</option>
       </select>
-
       <button id="btnExport" class="whBtn whBtnBlue">Export CSV</button>
       <a href="#monitor" class="whBtn whBtnGhost">Monitor</a>
     </div>
-
     <div class="whBoard">
-      <div class="whCol">
-        <div class="whColHead">
-          <div class="whColTitle">NEW</div>
-          <div class="whColHint">Pick these first</div>
-          <div class="whColCount" id="countNEW">0</div>
-        </div>
-        <div class="whColBody" id="colNEW"></div>
-      </div>
-
-      <div class="whCol">
-        <div class="whColHead">
-          <div class="whColTitle">TAKEN</div>
-          <div class="whColHint">Preparing / on the way</div>
-          <div class="whColCount" id="countTAKEN">0</div>
-        </div>
-        <div class="whColBody" id="colTAKEN"></div>
-      </div>
-
-      <div class="whCol">
-        <div class="whColHead">
-          <div class="whColTitle">DELIVERED</div>
-          <div class="whColHint">Waiting line confirmation</div>
-          <div class="whColCount" id="countDELIVERED">0</div>
-        </div>
-        <div class="whColBody" id="colDELIVERED"></div>
-      </div>
+      <div class="whCol"><div class="whColHead"><div class="whColTitle">NEW</div><div class="whColCount" id="countNEW">0</div></div><div class="whColBody" id="colNEW"></div></div>
+      <div class="whCol"><div class="whColHead"><div class="whColTitle">TAKEN</div><div class="whColCount" id="countTAKEN">0</div></div><div class="whColBody" id="colTAKEN"></div></div>
+      <div class="whCol"><div class="whColHead"><div class="whColTitle">DELIVERED</div><div class="whColCount" id="countDELIVERED">0</div></div><div class="whColBody" id="colDELIVERED"></div></div>
     </div>
   `;
 
-  const searchEl = document.getElementById("search");
-  const lineEl   = document.getElementById("lineFilter");
-  const rangeEl  = document.getElementById("rangeFilter");
-  const exportBtn= document.getElementById("btnExport");
-
-  const colNEW = document.getElementById("colNEW");
-  const colTAKEN = document.getElementById("colTAKEN");
-  const colDEL = document.getElementById("colDELIVERED");
-
-  const countNEW = document.getElementById("countNEW");
-  const countTAKEN = document.getElementById("countTAKEN");
-  const countDEL = document.getElementById("countDELIVERED");
-
-  function readState(){
-    state.q = searchEl.value || "";
-    state.line = lineEl.value || "ALL";
-    state.daysBack = Number(rangeEl.value || 1);
-  }
-
-  function waitingSecWarehouse(r){
-    // In WH view, delivered cards show lead time frozen
-    return calcSeconds(r);
-  }
-
-  function makeCard(r){
-    const sec = waitingSecWarehouse(r);
-    const card = document.createElement("div");
-    card.className = `whCard2 ${urgencyClass(sec)}`;
-
-    const req = r.requested_at ? new Date(r.requested_at) : null;
-    const del = r.delivered_at ? new Date(r.delivered_at) : null;
-
-    card.innerHTML = `
-      <div class="whCardTop2">
-        <div class="whLinePill">${r.line}</div>
-        <div class="whTimeBig">${formatSec(sec)}</div>
-      </div>
-
-      <div class="whComp2">${r.component}</div>
-
-      <div class="whSub2">
-        <div><span class="muted2">Qty</span> <b>${r.qty ?? 1}</b> ${r.unit ?? ""}</div>
-        <div class="muted2">${r.status}</div>
-      </div>
-
-      <div class="whMiniTimes2">
-        <div><span class="muted2">Req</span> ${req ? req.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : "-"}</div>
-        <div><span class="muted2">Del</span> ${del ? del.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : "-"}</div>
-      </div>
-
-      <div class="whBtns2" id="btns-${r.id}"></div>
-    `;
-
-    const btns = card.querySelector(`#btns-${r.id}`);
-
-    const takeBtn = document.createElement("button");
-    takeBtn.className = "whBigBtn whTake";
-    takeBtn.textContent = "TAKE";
-    takeBtn.disabled = (String(r.status).toUpperCase() !== "NEW");
-    takeBtn.onclick = () => window.take(r.id);
-
-    const delBtn = document.createElement("button");
-    delBtn.className = "whBigBtn whDel";
-    delBtn.textContent = "DELIVER";
-    delBtn.disabled = (String(r.status).toUpperCase() === "DELIVERED");
-    delBtn.onclick = () => window.deliver(r.id);
-
-    btns.appendChild(takeBtn);
-    btns.appendChild(delBtn);
-
-    return card;
-  }
-
   async function render(){
-    readState();
-
-    const daysBack = state.daysBack;
-    const since = new Date(Date.now() - daysBack*24*60*60*1000).toISOString();
-
-    let q = sb
-      .from("requests")
-      .select("*")
-      .gte("requested_at", since)
-      .in("status", ["NEW","TAKEN","DELIVERED"])
-      .order("requested_at", {ascending:true});
-
-    if(state.line !== "ALL") q = q.eq("line", state.line);
-
-    const { data, error } = await q;
+    const { data, error } = await sb.from("requests").select("*").in("status", ["NEW","TAKEN","DELIVERED"]).order("requested_at", {ascending:true});
     if(error){ console.error(error); return; }
 
-    let rows = data || [];
-    if(state.q.trim()){
-      const needle = state.q.trim().toLowerCase();
-      rows = rows.filter(r => String(r.component||"").toLowerCase().includes(needle));
-    }
-
     const byStatus = { NEW:[], TAKEN:[], DELIVERED:[] };
-    rows.forEach(r => byStatus[r.status]?.push(r));
+    (data||[]).forEach(r => byStatus[r.status]?.push(r));
 
-    ["NEW","TAKEN","DELIVERED"].forEach(st => {
-      byStatus[st].sort((a,b)=>(calcSeconds(b)||0)-(calcSeconds(a)||0));
-    });
+    const colNEW = document.getElementById("colNEW");
+    const colTAKEN = document.getElementById("colTAKEN");
+    const colDEL = document.getElementById("colDELIVERED");
 
     colNEW.innerHTML = "";
     colTAKEN.innerHTML = "";
     colDEL.innerHTML = "";
 
-    byStatus.NEW.forEach(r => colNEW.appendChild(makeCard(r)));
-    byStatus.TAKEN.forEach(r => colTAKEN.appendChild(makeCard(r)));
-    byStatus.DELIVERED.forEach(r => colDEL.appendChild(makeCard(r)));
+    byStatus.NEW.forEach(r => colNEW.appendChild(document.createTextNode(r.component)));
+    byStatus.TAKEN.forEach(r => colTAKEN.appendChild(document.createTextNode(r.component)));
+    byStatus.DELIVERED.forEach(r => colDEL.appendChild(document.createTextNode(r.component)));
 
-    countNEW.textContent = byStatus.NEW.length;
-    countTAKEN.textContent = byStatus.TAKEN.length;
-    countDEL.textContent = byStatus.DELIVERED.length;
+    document.getElementById("countNEW").textContent = byStatus.NEW.length;
+    document.getElementById("countTAKEN").textContent = byStatus.TAKEN.length;
+    document.getElementById("countDELIVERED").textContent = byStatus.DELIVERED.length;
   }
 
-  window.take = async (id) => {
-    const { error } = await sb.from("requests").update({
-      status:"TAKEN",
-      taken_at:new Date().toISOString()
-    }).eq("id", id);
-    if(error) console.error(error);
-  };
-
   window.deliver = async (id) => {
-  const { data, error } = await sb
-    .from("requests")
-    .select("requested_at")
-    .eq("id", id)
-    .single();
+    const { data, error } = await sb.from("requests").select("requested_at").eq("id", id).single();
+    if(error || !data){ console.error(error); return; }
 
-  if (error || !data) { console.error(error); return; }
+    const startD = parseTs(data.requested_at);
+    if (!startD) { console.error("Bad requested_at"); return; }
 
-  const startD = parseTs(data.requested_at);
-  if (!startD) { console.error("Bad requested_at", data.requested_at); return; }
+    const start = startD.getTime();
+    const now = Date.now();
+    const duration = Math.max(0, Math.floor((now - start)/1000));
 
-  const start = startD.getTime();
-  const now = Date.now();
-  const duration = Math.max(0, Math.floor((now - start) / 1000));
-
-  const { error: updErr } = await sb.from("requests").update({
-    status: "DELIVERED",
-    delivered_at: new Date(now).toISOString(),
-    duration_sec: duration
-  }).eq("id", id);
-
-  if (updErr) console.error(updErr);
-};
-
-  // Export CSV (simple, last range)
-  window.downloadCSV = async () => {
-    readState();
-    const since = new Date(Date.now() - state.daysBack*24*60*60*1000).toISOString();
-
-    let q = sb
-      .from("requests")
-      .select("id,line,component,qty,unit,status,priority,requested_at,taken_at,delivered_at,confirmed_at,duration_sec")
-      .gte("requested_at", since)
-      .order("requested_at", { ascending: true });
-
-    if (state.line && state.line !== "ALL") q = q.eq("line", state.line);
-
-    const { data, error } = await q;
-    if (error) { console.error(error); alert("Export failed"); return; }
-
-    const cols = ["id","line","component","qty","unit","status","priority","requested_at","taken_at","delivered_at","confirmed_at","duration_sec"];
-    const esc = (v) => {
-      if (v == null) return "";
-      const s = String(v).replace(/"/g,'""');
-      return /[",\n]/.test(s) ? `"${s}"` : s;
-    };
-    const rows = (data || []);
-    const csv = [cols.join(","), ...rows.map(r => cols.map(c => esc(r[c])).join(","))].join("\n");
-
-    const blob = new Blob([csv], { type:"text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `kanban_${state.line}_${state.daysBack}d_${new Date().toISOString().slice(0,10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    const { error: updErr } = await sb.from("requests").update({
+      status:"DELIVERED",
+      delivered_at: new Date(now).toISOString(),
+      duration_sec: duration
+    }).eq("id", id);
+    if(updErr) console.error(updErr);
   };
-
-  exportBtn.onclick = () => window.downloadCSV();
-
-  searchEl.addEventListener("input", render);
-  lineEl.addEventListener("change", render);
-  rangeEl.addEventListener("change", render);
 
   render();
-
-  sb.channel("warehouse_requests")
-    .on("postgres_changes", {event:"*", schema:"public", table:"requests"}, render)
-    .subscribe();
-
-  setInterval(render, 2000);
 }
 
 // ====== MONITOR SCREEN ======
 async function loadMonitor() {
-  app.innerHTML = `
-    <div class="header">MONITOR</div>
-    <div class="toolbar">
-      <a href="#warehouse" class="linkBtn">Warehouse</a>
-      <div style="opacity:.85;">Yellow ≥ ${YELLOW_AFTER_MIN} min | Red ≥ ${RED_AFTER_MIN} min</div>
-    </div>
-    <div id="monitorRows"></div>
-  `;
-
-  const el = document.getElementById("monitorRows");
-
-  async function render() {
-    const since = new Date(Date.now() - 7*24*60*60*1000).toISOString();
-
-    const { data, error } = await sb
-      .from("requests")
-      .select("*")
-      .gte("requested_at", since)
-      .neq("status","CONFIRMED")
-      .order("requested_at", { ascending: true });
-
-    if(error){ console.error(error); return; }
-
-    const items = (data || [])
-      .map(r => ({ r, sec: calcSeconds(r) }))
-      .sort((a,b)=>(b.sec||0)-(a.sec||0));
-
-    el.innerHTML = "";
-    items.forEach(({ r, sec }) => {
-      const card = document.createElement("div");
-      card.className = "card monitorCard";
-      card.innerHTML = `
-        <div class="rowTop">
-          <div>
-            <div style="font-weight:bold;font-size:22px;">${r.line} — ${r.component}</div>
-            <div style="opacity:.85;font-size:16px;">Status: <span class="${statusClass(r.status)}">${r.status}</span></div>
-          </div>
-          <div class="${waitingColorClass(sec)} timerBig">
-            ${["DELIVERED","CONFIRMED","REJECTED"].includes(String(r.status||"").toUpperCase()) ? "Lead" : "Wait"}: ${formatSec(sec)}
-          </div>
-        </div>
-      `;
-      el.appendChild(card);
-    });
-  }
-
-  render();
-
-  sb.channel("monitor_requests")
-    .on("postgres_changes", { event:"*", schema:"public", table:"requests" }, render)
-    .subscribe();
-
-  setInterval(render, 2000);
+  app.innerHTML = `<div class="header">MONITOR</div><div id="monitorRows"></div>`;
 }
 
 // ====== ROUTING ======
-if (route.startsWith("#line/")) loadLine(route.split("/")[1]); // #line/L1
+if (route.startsWith("#line/")) loadLine(route.split("/")[1]);
 else if (route.startsWith("#monitor")) loadMonitor();
 else loadWarehouse();
-
-
